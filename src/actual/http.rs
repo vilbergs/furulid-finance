@@ -7,8 +7,8 @@ use serde::de::DeserializeOwned;
 use serde::Deserialize;
 
 use super::{
-    Account, ActualStore, CategoryGroup, ImportOptions, ImportResult, NewTransaction, Payee, Rule,
-    Transaction, TransactionPatch,
+    Account, ActualStore, AddTransaction, CategoryGroup, ImportOptions, ImportResult,
+    NewTransaction, Payee, Rule, Transaction, TransactionPatch,
 };
 
 pub struct HttpStore {
@@ -74,6 +74,60 @@ impl HttpStore {
             serde_json::from_str(&body).with_context(|| format!("decoding {url}: {body}"))?;
         Ok(envelope.data)
     }
+
+    /// Any request against the budget, for `jevcat api`. Returns the `data` field when
+    /// the response has one, otherwise the whole body.
+    pub async fn raw(
+        &self,
+        method: &str,
+        path: &str,
+        query: Option<&str>,
+        body: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value> {
+        let mut url = self.url(path.trim_start_matches('/'));
+        if let Some(query) = query {
+            url.push('?');
+            url.push_str(query);
+        }
+        let method = reqwest::Method::from_bytes(method.to_uppercase().as_bytes())
+            .with_context(|| format!("bad method {method:?}"))?;
+        let mut request = self.client.request(method.clone(), &url);
+        if let Some(body) = body {
+            request = request.json(&body);
+        }
+        let response = request
+            .send()
+            .await
+            .with_context(|| format!("{method} {url}"))?;
+        let status = response.status();
+        let text = response.text().await.with_context(|| format!("reading {url}"))?;
+        anyhow::ensure!(status.is_success(), "{method} {url} returned {status}: {text}");
+        let value: serde_json::Value = serde_json::from_str(&text)
+            .unwrap_or_else(|_| serde_json::Value::String(text.clone()));
+        Ok(match value {
+            serde_json::Value::Object(mut map) if map.contains_key("data") => {
+                map.remove("data").unwrap_or_default()
+            }
+            other => other,
+        })
+    }
+
+    async fn post_json(&self, path: &str, body: &serde_json::Value) -> Result<()> {
+        let url = self.url(path);
+        let response = self
+            .client
+            .post(&url)
+            .json(body)
+            .send()
+            .await
+            .with_context(|| format!("POST {url}"))?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            anyhow::bail!("POST {url} returned {status}: {body}");
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -91,11 +145,14 @@ impl ActualStore for HttpStore {
     }
 
     async fn transactions(&self, account_id: &str, since: &str) -> Result<Vec<Transaction>> {
-        self.get(
-            &format!("accounts/{account_id}/transactions"),
-            &[("since_date", since)],
-        )
-        .await
+        let rows: Vec<Transaction> = self
+            .get(
+                &format!("accounts/{account_id}/transactions"),
+                &[("since_date", since)],
+            )
+            .await?;
+        // Deleted rows come back with tombstone set; nothing here should see them.
+        Ok(rows.into_iter().filter(|tx| !tx.tombstone).collect())
     }
 
     async fn update_transaction(&self, id: &str, patch: &TransactionPatch) -> Result<()> {
@@ -149,19 +206,20 @@ impl ActualStore for HttpStore {
     }
 
     async fn create_rule(&self, rule: &Rule) -> Result<()> {
-        let url = self.url("rules");
-        let response = self
-            .client
-            .post(&url)
-            .json(&serde_json::json!({ "rule": rule }))
-            .send()
+        self.post_json("rules", &serde_json::json!({ "rule": rule }))
             .await
-            .with_context(|| format!("POST {url}"))?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            anyhow::bail!("POST {url} returned {status}: {body}");
-        }
-        Ok(())
+    }
+
+    async fn add_transaction(&self, account_id: &str, transaction: &AddTransaction) -> Result<()> {
+        // One transaction per call: the endpoint rejects a `transactions` array.
+        self.post_json(
+            &format!("accounts/{account_id}/transactions"),
+            &serde_json::json!({
+                "transaction": transaction,
+                "learnCategories": false,
+                "runTransfers": false,
+            }),
+        )
+        .await
     }
 }

@@ -290,11 +290,18 @@ async fn import_sends_rows_then_categorizes_only_the_added_ones() {
     let jev = MockServer::start().await;
     mock_budget(&actual, json!([])).await;
 
-    // After the import, Actual holds the new row plus an old one that was matched.
+    // Before the import the account holds one old row without bank text, so the CSV's
+    // ESPRESSO HOUSE row is not recognised as present and is sent. Actual then
+    // fuzzy-matches it to old1 and reports it as updated.
+    let before_import = json!([
+        { "id": "old1", "account": "a1", "date": "2026-10-01", "amount": -500, "payee": "p2",
+          "category": null, "notes": null }
+    ]);
     let after_import = json!([
         { "id": "new1", "account": "a1", "date": "2026-10-09", "amount": -12900, "payee": "p1",
           "imported_payee": "ICA NÄRA", "category": null, "notes": null },
         { "id": "old1", "account": "a1", "date": "2026-10-01", "amount": -500, "payee": "p2",
+          "imported_payee": "ESPRESSO HOUSE", "imported_id": "jevcat-bafa8e15ed756c85",
           "category": null, "notes": null }
     ]);
     Mock::given(method("POST"))
@@ -303,8 +310,8 @@ async fn import_sends_rows_then_categorizes_only_the_added_ones() {
             "dryRun": false,
             "payeeNameNormalization": "title-case",
             "transactions": [
-                { "date": "2026-10-09", "amount": -12900, "payee_name": "ICA NÄRA", "imported_payee": "ICA NÄRA" },
-                { "date": "2026-10-01", "amount": -500, "payee_name": "ESPRESSO HOUSE" }
+                { "date": "2026-10-01", "amount": -500, "payee_name": "ESPRESSO HOUSE" },
+                { "date": "2026-10-09", "amount": -12900, "payee_name": "ICA NÄRA", "imported_payee": "ICA NÄRA" }
             ]
         })))
         .respond_with(move |_: &Request| {
@@ -313,13 +320,20 @@ async fn import_sends_rows_then_categorizes_only_the_added_ones() {
         .expect(1)
         .mount(&actual)
         .await;
-    // Outranks the empty transaction list mounted by mock_budget, so the reload after
-    // the import sees the new rows. The run is limited to the ids the import added,
-    // so old1 must stay untouched even though it is uncategorized.
+    // The snapshot load and the pre-import look-back see the old state; every later
+    // read (verification, categorization) sees the imported rows. The run is limited to
+    // the ids the import added, so old1 must stay untouched even though it is uncategorized.
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/budgets/{SYNC}/accounts/a1/transactions")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": before_import })))
+        .up_to_n_times(2)
+        .with_priority(1)
+        .mount(&actual)
+        .await;
     Mock::given(method("GET"))
         .and(path(format!("/v1/budgets/{SYNC}/accounts/a1/transactions")))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": after_import })))
-        .with_priority(1)
+        .with_priority(2)
         .mount(&actual)
         .await;
 
@@ -360,14 +374,104 @@ async fn import_sends_rows_then_categorizes_only_the_added_ones() {
 
     let (ok, out) = jevcat(&config, &["import", csv.to_str().unwrap()]);
     assert!(ok, "{out}");
-    assert!(out.contains("2 rows"), "{out}");
-    assert!(out.contains("Import: 1 added, 1 matched existing"), "{out}");
+    assert!(out.contains("2 rows in"), "{out}");
+    assert!(out.contains("2 rows to import"), "{out}");
+    assert!(
+        out.contains("Import: 1 added, 1 matched existing, 0 restored; all 2 CSV rows present exactly once"),
+        "{out}"
+    );
     assert!(
         out.contains("written: 1 applied, 0 flagged, 0 missed, 0 failed, 1 rules"),
         "{out}"
     );
     actual.verify().await;
     jev.verify().await;
+}
+
+#[tokio::test]
+async fn import_skips_rows_already_in_the_account_and_restores_merged_ones() {
+    let actual = MockServer::start().await;
+    let jev = MockServer::start().await;
+    mock_budget(&actual, json!([])).await;
+
+    // ICA NÄRA arrived through bank sync (different id scheme) and must be skipped.
+    // A Swish to Alex from 2026-09-28 has no imported_id and the same amount as the
+    // CSV's 2026-10-01 Swish, so Actual merges the new row into it.
+    let before = json!([
+        { "id": "sync1", "account": "a1", "date": "2026-10-09", "amount": -12900, "payee": "p1",
+          "imported_payee": "ICA NÄRA", "imported_id": "2026-10-09-20.03.00.1", "category": "c1", "notes": "ICA NÄRA #jev" },
+        { "id": "old1", "account": "a1", "date": "2026-09-28", "amount": -500, "payee": "p2",
+          "imported_payee": "Swish betalning ALEX", "category": "c2", "notes": "Swish betalning ALEX" }
+    ]);
+    let merged = json!([
+        before[0],
+        { "id": "old1", "account": "a1", "date": "2026-09-28", "amount": -500, "payee": "p2",
+          "imported_payee": "Swish betalning ALEX", "imported_id": "jevcat-a6f1df4b2d80b0d7",
+          "category": "c2", "notes": "Swish betalning ALEX" }
+    ]);
+    let restored = json!([
+        before[0], before[1],
+        { "id": "new1", "account": "a1", "date": "2026-10-01", "amount": -500, "payee": "p2",
+          "imported_payee": "Swish betalning ALEX", "imported_id": "jevcat-a6f1df4b2d80b0d7",
+          "category": "c2", "notes": "Swish betalning ALEX" }
+    ]);
+    for (state, n, priority) in [(before, 2, 1), (merged, 1, 2), (restored, 1, 3)] {
+        Mock::given(method("GET"))
+            .and(path(format!("/v1/budgets/{SYNC}/accounts/a1/transactions")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": state })))
+            .up_to_n_times(n)
+            .with_priority(priority)
+            .mount(&actual)
+            .await;
+    }
+    Mock::given(method("POST"))
+        .and(path(format!("/v1/budgets/{SYNC}/accounts/a1/transactions/import")))
+        .and(body_partial_json(json!({ "transactions": [
+            { "date": "2026-10-01", "amount": -500, "payee_name": "Swish betalning ALEX" }
+        ]})))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({ "data": { "added": [], "updated": ["old1"] } })))
+        .expect(1)
+        .mount(&actual)
+        .await;
+    // The repair: clear the stolen id on old1, add the row back with old1's payee and category.
+    Mock::given(method("PATCH"))
+        .and(path(format!("/v1/budgets/{SYNC}/transactions/old1")))
+        .and(body_partial_json(json!({ "transaction": { "imported_id": null } })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "message": "ok" })))
+        .expect(1)
+        .mount(&actual)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(format!("/v1/budgets/{SYNC}/accounts/a1/transactions")))
+        .and(body_partial_json(json!({ "transaction": {
+            "date": "2026-10-01", "amount": -500, "payee": "p2", "category": "c2",
+            "imported_payee": "Swish betalning ALEX", "imported_id": "jevcat-a6f1df4b2d80b0d7", "cleared": true
+        }, "learnCategories": false })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "message": "ok" })))
+        .expect(1)
+        .mount(&actual)
+        .await;
+
+    let dir = tempdir();
+    let config = write_config(&dir, &actual, &jev);
+    let csv = dir.join("statement.csv");
+    std::fs::write(
+        &csv,
+        "Datum;Belopp;Text\n2026-10-09;-129,00;ICA NÄRA\n2026-10-01;-5,00;Swish betalning ALEX\n",
+    )
+    .unwrap();
+
+    let (ok, out) = jevcat(&config, &["import", csv.to_str().unwrap(), "--no-categorize"]);
+    assert!(ok, "{out}");
+    assert!(out.contains("1 rows already in the account, skipped:"), "{out}");
+    assert!(out.contains("1 rows Actual may merge into an older transaction"), "{out}");
+    assert!(out.contains("restored 2026-10-01      -5.00 Swish betalning ALEX (payee and category copied from 2026-09-28)"), "{out}");
+    assert!(
+        out.contains("Import: 0 added, 1 matched existing, 1 restored; all 2 CSV rows present exactly once"),
+        "{out}"
+    );
+    actual.verify().await;
+    assert!(jev.received_requests().await.unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -407,7 +511,7 @@ async fn import_dry_run_writes_nothing() {
         ],
     );
     assert!(ok, "{out}");
-    assert!(out.contains("Import would add 1 rows"), "{out}");
+    assert!(out.contains("1 rows to import"), "{out}");
     assert!(
         out.contains("APPLY") && out.contains("-> Groceries (0.97)"),
         "{out}"

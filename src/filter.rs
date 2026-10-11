@@ -106,6 +106,8 @@ mod tests {
             is_parent: false,
             is_child: false,
             starting_balance_flag: false,
+            tombstone: false,
+            raw_synced_data: None,
             imported_id: None,
         }
     }

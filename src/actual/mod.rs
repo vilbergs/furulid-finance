@@ -78,6 +78,11 @@ pub struct Transaction {
     pub is_child: bool,
     #[serde(default, deserialize_with = "flag")]
     pub starting_balance_flag: bool,
+    #[serde(default, deserialize_with = "flag")]
+    pub tombstone: bool,
+    /// Bank sync's original payload as a JSON string; absent on imported rows.
+    #[serde(default)]
+    pub raw_synced_data: Option<String>,
 }
 
 /// The fields a run is allowed to change on a transaction.
@@ -87,6 +92,26 @@ pub struct TransactionPatch {
     pub category: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
+    /// `Some(None)` clears the id (serializes as `null`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub imported_id: Option<Option<String>>,
+}
+
+/// A single transaction to add without Actual's matching, used to restore rows the
+/// import merged into older ones.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct AddTransaction {
+    pub date: String,
+    pub amount: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payee: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+    pub imported_payee: String,
+    pub imported_id: String,
+    pub cleared: bool,
 }
 
 /// A transaction to import, in the shape Actual's `importTransactions` expects.
@@ -166,6 +191,22 @@ pub trait ActualStore: Send + Sync {
     ) -> Result<ImportResult>;
     async fn rules(&self) -> Result<Vec<Rule>>;
     async fn create_rule(&self, rule: &Rule) -> Result<()>;
+    /// Adds one transaction as-is: no rules, no de-duplication, no fuzzy matching.
+    async fn add_transaction(&self, account_id: &str, transaction: &AddTransaction) -> Result<()>;
+}
+
+impl Snapshot {
+    pub fn category_names(&self) -> HashMap<String, String> {
+        self.groups
+            .iter()
+            .flat_map(|group| group.categories.iter())
+            .map(|category| (category.id.clone(), category.name.clone()))
+            .collect()
+    }
+
+    pub fn payee_names(&self) -> HashMap<String, String> {
+        self.payee_names.clone()
+    }
 }
 
 /// One read of everything a run needs, so lookups during the run are in memory.
@@ -269,10 +310,19 @@ mod tests {
         let patch = TransactionPatch {
             category: Some("c1".into()),
             notes: None,
+            imported_id: None,
         };
         assert_eq!(
             serde_json::to_string(&patch).unwrap(),
             r#"{"category":"c1"}"#
+        );
+        let clear = TransactionPatch {
+            imported_id: Some(None),
+            ..Default::default()
+        };
+        assert_eq!(
+            serde_json::to_string(&clear).unwrap(),
+            r#"{"imported_id":null}"#
         );
     }
 }

@@ -62,6 +62,7 @@ pub fn patch_for(action: &Action, tx: &Transaction, tags: &TagConfig) -> Transac
         Action::Apply { category_id, .. } => TransactionPatch {
             category: Some(category_id.clone()),
             notes: Some(tags::with_tag(notes, &prefix, &tags.applied, None)),
+            imported_id: None,
         },
         Action::Flag { label, confidence } => TransactionPatch {
             category: None,
@@ -71,10 +72,12 @@ pub fn patch_for(action: &Action, tx: &Transaction, tags: &TagConfig) -> Transac
                 &tags.flagged,
                 Some(&format!("{label} {confidence:.2}")),
             )),
+            imported_id: None,
         },
         Action::Skip { .. } => TransactionPatch {
             category: None,
             notes: Some(tags::with_tag(notes, &prefix, &tags.missed, None)),
+            imported_id: None,
         },
     }
 }
@@ -347,6 +350,8 @@ mod tests {
             is_parent: false,
             is_child: false,
             starting_balance_flag: false,
+            tombstone: false,
+            raw_synced_data: None,
             imported_id: None,
         }
     }
@@ -375,6 +380,7 @@ mod tests {
             TransactionPatch {
                 category: Some("c1".into()),
                 notes: Some("weekly #jev".into()),
+            imported_id: None,
             }
         );
 
@@ -387,6 +393,7 @@ mod tests {
             TransactionPatch {
                 category: None,
                 notes: Some("weekly #jev-flag [jev: Groceries 0.70]".into()),
+            imported_id: None,
             }
         );
 
@@ -399,6 +406,7 @@ mod tests {
             TransactionPatch {
                 category: None,
                 notes: Some("#jev-miss".into()),
+            imported_id: None,
             }
         );
     }

@@ -15,7 +15,12 @@ jevcat run --apply               ...and write it
 jevcat calibrate                 measure accuracy per confidence on your categorized history
 jevcat learn --apply             turn payees Jev has placed consistently into Actual rules
 jevcat list                      show what a run would look at, without calling Jev
+jevcat open                      table of uncategorized transactions with the bank text and Jev's guess
+jevcat set plan.json             write categories from a plan, tagging each row #reviewed
+jevcat api accounts              call actual-http-api directly
 ```
+
+`--since-days N` before any command widens the look-back for that call.
 
 ## How it reaches Actual
 
@@ -77,13 +82,32 @@ jevcat import ~/Downloads/statement.csv --account Checking
 
 1. The CSV is parsed with the column names, delimiter and date format from `[import]`.
    Amounts like `-1 234,56`, `-1.234,56` and `1,234.56` are all read correctly.
-2. Rows go through Actual's own import, which runs your rules and de-duplicates on
-   `imported_id` (a bank id column if you name one, otherwise a stable hash of the row).
-   Re-importing the same file adds nothing.
-3. Only the rows Actual reports as added are classified, and the result is written.
+2. Rows already in the account are skipped: same date, amount, and the bank text found in
+   the existing row's notes or imported payee. That catches rows that arrived through
+   bank sync or by hand, which Actual's own `imported_id` check cannot see.
+3. The rest go through Actual's import in chunks of 100 (`--chunk`), oldest first, which
+   runs your rules. Actual also fuzzy-matches a new row to an older one with the same
+   amount within seven days; the import re-reads the account afterwards, checks that every
+   CSV row is present exactly once, and adds back the rows that were merged away.
+4. Only the rows that were added are classified, and the result is written.
 
-`--dry-run` parses and sends the import with Actual's dry-run flag, so you see what
-would be added without changing the budget. `--no-categorize` imports only.
+`--dry-run` prints what would be skipped and imported, and how Jev would classify the new
+rows, without writing anything. `--no-categorize` imports only.
+
+## Reviewing what Jev could not place
+
+```sh
+jevcat open                          # uncategorized rows, last six months
+jevcat open --around 2026-09-26      # everything within three days of a date
+jevcat open --payee "Sot & Ven"      # every row for a payee, with its category
+jevcat set plan.json --dry-run       # then without --dry-run
+```
+
+`open` prints a markdown table with the payee, the bank's full text (including the second
+remittance line Nordea puts in notes and Swish messages), the transaction type and original
+currency from bank sync, and Jev's guess. `set` takes a JSON list of
+`{"id", "category", "note"?, "replace_notes"?, "rule"?}` and writes the category with a
+`#reviewed` tag, optionally creating a payee rule.
 
 ## What a run writes
 
@@ -120,6 +144,9 @@ accounts, rows with no payee, and anything that already has a category.
 | `classify` | `Classifier` trait, `Taxonomy` built from category groups, `Subject` sent to the model |
 | `classify::jev` | one `POST /v1/systemone` with retries |
 | `import` | CSV parsing to Actual's import shape |
+| `gap` | matching CSV rows against the account, verification after an import |
+| `review` | `open` and `set` |
+| `text` | reading bank text, currency and Jev tags off a transaction |
 | `filter` | eligibility rules |
 | `policy` | decision to apply / flag / skip |
 | `calibrate` | accuracy per confidence bucket, threshold suggestion |
