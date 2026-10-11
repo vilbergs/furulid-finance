@@ -33,8 +33,8 @@ docker run -d --name actual-http-api \
   jhonderson/actual-http-api:26.10.0
 ```
 
-Hosting Actual on Fly.io? `deploy/actual-api/` has a `fly.toml` and the steps to run the
-sidecar there.
+Hosting Actual on Fly.io? `deploy/actual-server/` and `deploy/actual-api/` have a `fly.toml`
+each, and `deploy/actual-api/README.md` has the steps to run both there.
 
 Everything that touches Actual goes through the `ActualStore` trait in `src/actual`, so a
 native Rust sync client can replace the sidecar later without changing anything else.
@@ -44,11 +44,19 @@ native Rust sync client can replace the sidecar later without changing anything 
 ```sh
 cargo install --path .
 cp jevcat.example.toml jevcat.toml      # fill in base_url, budget_sync_id, [import] columns
-export ACTUAL_HTTP_API_KEY=…            # the API_KEY above
-export TYPESAFE_API_KEY=…
-export ACTUAL_ENCRYPTION_PASSWORD=…     # only for an end-to-end encrypted budget
+cp .env.example .env                    # fill in the API keys; exported env vars also work
 jevcat list
 ```
+
+Check that everything is wired up before the first import:
+
+```sh
+cargo test preflight -- --ignored --nocapture
+```
+
+It reads `jevcat.toml` and `.env`, loads the budget (read-only), checks that the import
+account and every `[jev.descriptions]` key exist, and sends five sample bank rows through the
+import parser and the real Jev client. It is ignored by a plain `cargo test`.
 
 Then calibrate before trusting it:
 

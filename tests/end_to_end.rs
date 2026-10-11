@@ -109,7 +109,9 @@ payee_column = "Text"
 }
 
 fn jevcat(config: &std::path::Path, args: &[&str]) -> (bool, String) {
+    // Run from the config's temp dir so a real .env in the repo is never loaded.
     let output = Command::new(env!("CARGO_BIN_EXE_jevcat"))
+        .current_dir(config.parent().unwrap())
         .arg("--config")
         .arg(config)
         .args(args)
@@ -377,13 +379,16 @@ async fn import_dry_run_writes_nothing() {
         .and(path(format!(
             "/v1/budgets/{SYNC}/accounts/a1/transactions/import"
         )))
-        .and(body_partial_json(json!({ "dryRun": true })))
-        .respond_with(
-            ResponseTemplate::new(201)
-                .set_body_json(json!({ "data": { "added": ["would-be"], "updated": [] } })),
-        )
-        .expect(1)
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
         .mount(&actual)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/systemone"))
+        .respond_with(jev_response("Groceries", 0.97))
+        .expect(1)
+        .mount(&jev)
         .await;
 
     let dir = tempdir();
@@ -402,9 +407,14 @@ async fn import_dry_run_writes_nothing() {
         ],
     );
     assert!(ok, "{out}");
-    assert!(out.contains("Import: 1 added"), "{out}");
-    assert!(out.contains("skipped on a dry run"), "{out}");
-    assert!(jev.received_requests().await.unwrap().is_empty());
+    assert!(out.contains("Import would add 1 rows"), "{out}");
+    assert!(
+        out.contains("APPLY") && out.contains("-> Groceries (0.97)"),
+        "{out}"
+    );
+    assert!(out.contains("would write: 1 applied"), "{out}");
+    jev.verify().await;
+    actual.verify().await;
     assert_eq!(
         actual
             .received_requests()
@@ -478,7 +488,9 @@ async fn list_needs_no_jev_and_secrets_are_required() {
     );
     assert!(jev.received_requests().await.unwrap().is_empty());
 
+    // Run from the config's temp dir so a real .env in the repo is never loaded.
     let output = Command::new(env!("CARGO_BIN_EXE_jevcat"))
+        .current_dir(config.parent().unwrap())
         .arg("--config")
         .arg(&config)
         .arg("list")

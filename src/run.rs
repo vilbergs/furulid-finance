@@ -7,8 +7,8 @@ use anyhow::Result;
 use futures::stream::{self, StreamExt};
 use tracing::{info, warn};
 
-use crate::actual::{ActualStore, Snapshot, Transaction, TransactionPatch};
-use crate::classify::{Classifier, Subject, Taxonomy};
+use crate::actual::{ActualStore, NewTransaction, Snapshot, Transaction, TransactionPatch};
+use crate::classify::{Classifier, Decision, Subject, Taxonomy};
 use crate::config::TagConfig;
 use crate::filter::{Filter, Skip};
 use crate::learn::{self, Applied};
@@ -143,39 +143,12 @@ pub async fn run(
         summary.input_tokens += tokens;
         let patch = patch_for(&action, tx, tags);
         let subject = Subject::from_transaction(tx, snapshot);
-        let payee = truncate(&subject.payee, 32);
-        match &action {
-            Action::Apply {
-                category_id,
-                label,
-                confidence,
-            } => {
-                summary.applied += 1;
-                println!(
-                    "{mode}  APPLY  {}  {:>10.2}  {payee:<32}  -> {label} ({confidence:.2})",
-                    tx.date, subject.amount
-                );
-                if let Some(payee_id) = tx.payee.clone() {
-                    applied_now.push(Applied {
-                        payee_id,
-                        category_id: category_id.clone(),
-                    });
-                }
-            }
-            Action::Flag { label, confidence } => {
-                summary.flagged += 1;
-                println!(
-                    "{mode}  FLAG   {}  {:>10.2}  {payee:<32}  ?  {label} ({confidence:.2})",
-                    tx.date, subject.amount
-                );
-            }
-            Action::Skip { label, confidence } => {
-                summary.missed += 1;
-                println!(
-                    "{mode}  MISS   {}  {:>10.2}  {payee:<32}  {label} ({confidence:.2})",
-                    tx.date, subject.amount
-                );
-            }
+        report(&mut summary, &action, mode, &subject);
+        if let (Action::Apply { category_id, .. }, Some(payee_id)) = (&action, tx.payee.clone()) {
+            applied_now.push(Applied {
+                payee_id,
+                category_id: category_id.clone(),
+            });
         }
         if options.apply {
             store.update_transaction(&tx.id, &patch).await?;
@@ -226,6 +199,99 @@ pub async fn learn_rules(
         }
     }
     Ok(candidates.len())
+}
+
+/// Classifies rows parsed from a CSV that are not in Actual yet, for `import --dry-run`.
+/// Prints the same lines as a dry `run`, so the decisions can be reviewed before importing.
+pub async fn preview(
+    rows: &[NewTransaction],
+    account: &str,
+    taxonomy: &Taxonomy,
+    classifier: Arc<dyn Classifier>,
+    apply_threshold: f64,
+    concurrency: usize,
+) -> Summary {
+    let mut summary = Summary {
+        considered: rows.len(),
+        ..Summary::default()
+    };
+    let subjects: Vec<Subject> = rows
+        .iter()
+        .filter(|row| {
+            let has_payee = !row.payee_name.is_empty();
+            if !has_payee {
+                *summary
+                    .skipped
+                    .entry(Skip::NoPayee.to_string())
+                    .or_default() += 1;
+            }
+            has_payee
+        })
+        .map(|row| Subject {
+            payee: row.payee_name.clone(),
+            imported_payee: row.imported_payee.clone(),
+            amount: row.amount as f64 / 100.0,
+            direction: if row.amount >= 0 { "inflow" } else { "outflow" },
+            date: row.date.clone(),
+            account: account.to_string(),
+            notes: row.notes.clone().unwrap_or_default(),
+        })
+        .collect();
+
+    let outcomes: Vec<(Subject, Result<Decision>)> = stream::iter(subjects)
+        .map(|subject| {
+            let classifier = Arc::clone(&classifier);
+            async move {
+                let result = classifier.classify(&subject, taxonomy).await;
+                (subject, result)
+            }
+        })
+        .buffered(concurrency.max(1))
+        .collect()
+        .await;
+
+    for (subject, outcome) in outcomes {
+        match outcome {
+            Ok(decision) => {
+                summary.input_tokens += decision.input_tokens;
+                let action = policy::decide(&decision, taxonomy, apply_threshold);
+                report(&mut summary, &action, "dry-run", &subject);
+            }
+            Err(error) => {
+                summary.failed += 1;
+                warn!(payee = %subject.payee, %error, "classification failed");
+            }
+        }
+    }
+    summary
+}
+
+fn report(summary: &mut Summary, action: &Action, mode: &str, subject: &Subject) {
+    let date = &subject.date;
+    let amount = subject.amount;
+    let payee = truncate(&subject.payee, 32);
+    match action {
+        Action::Apply {
+            label, confidence, ..
+        } => {
+            summary.applied += 1;
+            println!(
+                "{mode}  APPLY  {date}  {amount:>10.2}  {payee:<32}  -> {label} ({confidence:.2})"
+            );
+        }
+        Action::Flag { label, confidence } => {
+            summary.flagged += 1;
+            println!(
+                "{mode}  FLAG   {date}  {amount:>10.2}  {payee:<32}  ?  {label} ({confidence:.2})"
+            );
+        }
+        Action::Skip { label, confidence } => {
+            summary.missed += 1;
+            println!(
+                "{mode}  MISS   {date}  {amount:>10.2}  {payee:<32}  {label} ({confidence:.2})"
+            );
+        }
+    }
 }
 
 fn skip_key(reason: Skip) -> String {
@@ -281,6 +347,7 @@ mod tests {
             is_parent: false,
             is_child: false,
             starting_balance_flag: false,
+            imported_id: None,
         }
     }
 

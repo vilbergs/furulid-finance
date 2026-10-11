@@ -1,15 +1,13 @@
-# actual-http-api on Fly.io, next to your Actual server.
-# Edit the three placeholders, then: fly launch --copy-config --no-deploy && fly deploy
-# Pin the image tag to the version your Actual server runs.
+# actual-http-api on Fly.io, next to the Actual server. The app name is not stored here;
+# pass it on deploy (see README.md). ACTUAL_SERVER_URL is a Fly secret for the same reason.
+# Pin the image tag to the version the Actual server runs (deploy/actual-server/fly.toml).
 
-app = "actual-api"                     # must be unique on Fly
-primary_region = "arn"                 # same region as your Actual app
+primary_region = "arn"
 
 [build]
 image = "jhonderson/actual-http-api:26.10.0"
 
 [env]
-ACTUAL_SERVER_URL = "http://your-actual-app.internal:5006/"   # Fly app name of your Actual instance
 ACTUAL_DATA_DIR = "/data"
 NODE_ENV = "production"
 PORT = "5007"

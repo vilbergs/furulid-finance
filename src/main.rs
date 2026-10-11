@@ -6,6 +6,8 @@ mod filter;
 mod import;
 mod learn;
 mod policy;
+#[cfg(test)]
+mod preflight;
 mod run;
 mod tags;
 
@@ -90,6 +92,8 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Secrets may sit in a gitignored .env next to jevcat.toml; real env vars win.
+    dotenvy::dotenv().ok();
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .with_target(false)
@@ -233,7 +237,38 @@ async fn main() -> Result<()> {
                 rows.iter().map(|row| row.date.as_str()).max().unwrap_or("")
             );
             if dry_run {
+                // Never send a dry run to the import endpoint: actual-http-api before 26.x
+                // ignores `dryRun` and imports for real. Check for duplicates locally instead.
                 println!("Dry run: nothing is written.\n");
+                let existing = store.transactions(&account.id, earliest).await?;
+                let known: HashSet<&str> = existing
+                    .iter()
+                    .filter_map(|tx| tx.imported_id.as_deref())
+                    .collect();
+                let new_rows: Vec<_> = rows
+                    .iter()
+                    .filter(|row| !known.contains(row.imported_id.as_str()))
+                    .cloned()
+                    .collect();
+                println!(
+                    "Import would add {} rows; {} are already in the account",
+                    new_rows.len(),
+                    rows.len() - new_rows.len()
+                );
+                if no_categorize || new_rows.is_empty() {
+                    return Ok(());
+                }
+                let summary = run::preview(
+                    &new_rows,
+                    &account.name,
+                    &taxonomy,
+                    classifier(&config, &secrets)?,
+                    config.policy.apply_threshold,
+                    config.jev.concurrency,
+                )
+                .await;
+                print!("{}", summary.render(false));
+                return Ok(());
             }
 
             let result = store
@@ -241,7 +276,7 @@ async fn main() -> Result<()> {
                     &account.id,
                     &rows,
                     &ImportOptions {
-                        dry_run,
+                        dry_run: false,
                         payee_normalization: import_config.payee_normalization.clone(),
                     },
                 )
@@ -252,10 +287,6 @@ async fn main() -> Result<()> {
                 result.updated.len()
             );
             if no_categorize || result.added.is_empty() {
-                return Ok(());
-            }
-            if dry_run {
-                println!("Categorization is skipped on a dry run: Actual did not create the rows, so there is nothing to classify.");
                 return Ok(());
             }
 

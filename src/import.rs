@@ -4,10 +4,12 @@
 //! decimal mark is a comma, whether there is a preamble. All of that is config; the
 //! code only has to be forgiving about amounts and stable about `imported_id`.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{Context, Result};
 use chrono::NaiveDate;
+use regex::Regex;
 use serde::Deserialize;
 
 use crate::actual::NewTransaction;
@@ -40,6 +42,14 @@ pub struct ImportConfig {
     /// How Actual normalizes payee names on import: `title-case` or `original`.
     #[serde(default = "default_payee_normalization")]
     pub payee_normalization: String,
+    /// Regexes removed from the payee column, for banks that prefix it with the payment
+    /// type or a date (`Kortköp 261008 ICA` → `ICA`). The raw text stays in `imported_payee`.
+    #[serde(default)]
+    pub payee_cleanup: Vec<String>,
+    /// Also write the raw payee text into notes when the row has no notes of its own, so
+    /// Actual rules written against the bank text (`notes contains "Omsättning lån"`) match.
+    #[serde(default)]
+    pub raw_payee_to_notes: bool,
 }
 
 fn default_date_format() -> String {
@@ -96,6 +106,14 @@ pub fn parse_csv(text: &str, config: &ImportConfig) -> Result<Vec<NewTransaction
         Vec::new()
     };
     let columns = resolve_columns(config, &headers)?;
+    let cleanup = config
+        .payee_cleanup
+        .iter()
+        .map(|pattern| Regex::new(pattern).with_context(|| format!("payee_cleanup {pattern:?}")))
+        .collect::<Result<Vec<_>>>()?;
+    // Identical rows (two equal card purchases on one day) would hash to the same id and
+    // Actual would drop all but one, so later occurrences get a counter in the hash.
+    let mut seen: HashMap<String, usize> = HashMap::new();
 
     let mut out = Vec::new();
     for (line, record) in reader.records().enumerate() {
@@ -117,32 +135,47 @@ pub fn parse_csv(text: &str, config: &ImportConfig) -> Result<Vec<NewTransaction
         let amount_text = field(&record, columns.amount, &headers);
         let amount = parse_amount(amount_text)
             .with_context(|| format!("row {row}: cannot read amount {amount_text:?}"))?;
-        let payee = field(&record, columns.payee, &headers).to_string();
+        let raw_payee = field(&record, columns.payee, &headers).to_string();
+        let payee = clean_payee(&raw_payee, &cleanup);
         let notes = columns
             .notes
             .map(|column| field(&record, column, &headers).to_string())
             .filter(|notes| !notes.is_empty());
+        let display_notes = notes.clone().or_else(|| {
+            (config.raw_payee_to_notes && !raw_payee.is_empty()).then(|| raw_payee.clone())
+        });
+        // The id hashes the notes column only, so turning `raw_payee_to_notes` on or off
+        // does not change the ids of rows that are already imported.
         let imported_id = match columns.id {
             Some(column) => {
                 let id = field(&record, column, &headers);
                 if id.is_empty() {
-                    row_hash(&date, amount, &payee, notes.as_deref())
+                    row_hash(&date, amount, &raw_payee, notes.as_deref(), &mut seen)
                 } else {
                     id.to_string()
                 }
             }
-            None => row_hash(&date, amount, &payee, notes.as_deref()),
+            None => row_hash(&date, amount, &raw_payee, notes.as_deref(), &mut seen),
         };
         out.push(NewTransaction {
             date,
             amount,
-            payee_name: payee.clone(),
-            imported_payee: payee,
-            notes,
+            payee_name: payee,
+            imported_payee: raw_payee,
+            notes: display_notes,
             imported_id,
         });
     }
     Ok(out)
+}
+
+fn clean_payee(raw: &str, cleanup: &[Regex]) -> String {
+    let mut payee = raw.to_string();
+    for pattern in cleanup {
+        payee = pattern.replace_all(&payee, "").into_owned();
+    }
+    let payee = payee.trim();
+    if payee.is_empty() { raw } else { payee }.to_string()
 }
 
 fn resolve_columns(config: &ImportConfig, headers: &[String]) -> Result<Columns> {
@@ -232,10 +265,25 @@ pub fn parse_amount(text: &str) -> Result<i64> {
 }
 
 /// FNV-1a over the row's identifying fields. Stable across runs and Rust versions, which
-/// `DefaultHasher` is not.
-fn row_hash(date: &str, amount: i64, payee: &str, notes: Option<&str>) -> String {
+/// `DefaultHasher` is not. The nth repeat of an identical row hashes with `|n` appended, so
+/// the first occurrence keeps the same id it would have had alone.
+fn row_hash(
+    date: &str,
+    amount: i64,
+    payee: &str,
+    notes: Option<&str>,
+    seen: &mut HashMap<String, usize>,
+) -> String {
+    let key = format!("{date}|{amount}|{payee}|{}", notes.unwrap_or(""));
+    let repeat = seen.entry(key.clone()).or_insert(0);
+    let input = if *repeat == 0 {
+        key
+    } else {
+        format!("{key}|{repeat}")
+    };
+    *repeat += 1;
     let mut hash: u64 = 0xcbf29ce484222325;
-    for byte in format!("{date}|{amount}|{payee}|{}", notes.unwrap_or("")).bytes() {
+    for byte in input.bytes() {
         hash ^= u64::from(byte);
         hash = hash.wrapping_mul(0x100000001b3);
     }
@@ -259,6 +307,8 @@ mod tests {
             has_header: true,
             skip_rows: 0,
             payee_normalization: "title-case".into(),
+            payee_cleanup: Vec::new(),
+            raw_payee_to_notes: false,
         }
     }
 
@@ -321,6 +371,62 @@ mod tests {
         let rows = parse_csv(text, &config).unwrap();
         assert_eq!(rows[0].date, "2026-10-08");
         assert_eq!(rows[0].amount, -1000);
+    }
+
+    #[test]
+    fn identical_rows_get_distinct_ids() {
+        let text = "Bokföringsdag;Belopp;Rubrik\n\
+                    2026-10-07;-76,00;Swish betalning VÄSTTRAFIK AB\n\
+                    2026-10-07;-76,00;Swish betalning VÄSTTRAFIK AB\n";
+        let mut config = config();
+        config.notes_column = None;
+        let rows = parse_csv(text, &config).unwrap();
+        assert_ne!(rows[0].imported_id, rows[1].imported_id);
+        let alone = parse_csv(&text[..text.rfind("2026").unwrap()], &config).unwrap();
+        assert_eq!(alone[0].imported_id, rows[0].imported_id);
+    }
+
+    #[test]
+    fn nordea_export_with_payee_cleanup() {
+        let text = "\u{feff}Bokföringsdag;Belopp;Avsändare;Mottagare;Namn;Rubrik;Saldo;Valuta;\n\
+                    2026/10/09;-111,00;123456-7890;;;Kortköp 261008 SUSHI BAR;1000,00;SEK;\n\
+                    2026/10/08;-514,00;123456-7890;;;Betalning BG 5014-1100 Telia Sverig;1111,00;SEK;\n\
+                    2026/10/07;500,00;;123456-7890;;Swish inbetalning ANNA ANDERSSON;1625,00;SEK;\n\
+                    2026/09/25;30000,00;;123456-7890;;Lön;31625,00;SEK;\n";
+        let mut config = config();
+        config.date_format = "%Y/%m/%d".into();
+        config.notes_column = None;
+        config.payee_cleanup = vec![
+            r"^Kortköp \d{6} ".into(),
+            r"^Swish (in)?betalning ".into(),
+            r"^(Betalning|Open Banking) BG [\d-]+ ".into(),
+        ];
+        let rows = parse_csv(text, &config).unwrap();
+        let payees: Vec<_> = rows.iter().map(|r| r.payee_name.as_str()).collect();
+        assert_eq!(
+            payees,
+            ["SUSHI BAR", "Telia Sverig", "ANNA ANDERSSON", "Lön"]
+        );
+        assert_eq!(rows[0].imported_payee, "Kortköp 261008 SUSHI BAR");
+        assert_eq!(rows[0].date, "2026-10-09");
+        assert_eq!(rows[2].amount, 50000);
+    }
+
+    #[test]
+    fn raw_payee_to_notes_keeps_ids_stable() {
+        let text =
+            "Bokföringsdag;Belopp;Rubrik\n2026-09-27;-1500,00;Omsättning lån 1234 56 78901\n";
+        let mut config = config();
+        config.notes_column = None;
+        let before = parse_csv(text, &config).unwrap();
+        config.raw_payee_to_notes = true;
+        let after = parse_csv(text, &config).unwrap();
+        assert_eq!(before[0].notes, None);
+        assert_eq!(
+            after[0].notes.as_deref(),
+            Some("Omsättning lån 1234 56 78901")
+        );
+        assert_eq!(before[0].imported_id, after[0].imported_id);
     }
 
     #[test]

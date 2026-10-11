@@ -35,16 +35,27 @@ learn_after = 2          # confident applies before a payee gets an Actual rule;
 
 # Only for `jevcat import <file.csv>`. Column names must match the CSV header
 # exactly (case-insensitive). Set has_header = false and use 0-based indexes
-# for exports without one.
+# for exports without one. Values below fit a Nordea "Personkonto" export.
 [import]
 account = "Checking"            # Actual account name or id; --account overrides
 delimiter = ";"
 has_header = true
 skip_rows = 0                   # lines of preamble before the header
 date_column = "Bokföringsdag"
-date_format = "%Y-%m-%d"
+date_format = "%Y/%m/%d"
 amount_column = "Belopp"
 payee_column = "Rubrik"
-notes_column = "Meddelande"     # optional
+# notes_column = "Meddelande"   # optional; Nordea has no message column
 # id_column = "Transaktionsid"  # optional: a column unique per row, used for de-duplication
 payee_normalization = "title-case"   # or "original" to keep the bank's casing
+# Copy the raw payee text into notes when the CSV has no notes column, so Actual rules
+# that match on notes keep working. Rows a rule categorizes are never sent to Jev.
+raw_payee_to_notes = true
+# Regexes stripped from the payee so "Kortköp 261008 ICA SUPERMARKET" becomes one payee
+# in Actual, not one per day. The raw text is kept as the imported payee.
+payee_cleanup = [
+  '^Kortköp \d{6} ',
+  '^Swish (in)?betalning ',
+  '^Autogiro ',
+  '^(Betalning|Open Banking) BG [\d-]+ ',
+]

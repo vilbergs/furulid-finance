@@ -1,0 +1,47 @@
+# Actual server on Fly.io. The app name is not stored here; pass it on deploy:
+#   fly deploy -c deploy/actual-server/fly.toml -a "$ACTUAL_SERVER_APP"
+# See https://fly.io/docs/reference/configuration/ for the rest of this file.
+
+primary_region = 'arn'
+
+[experimental]
+cmd = ['node', '--max-old-space-size=180', 'app.js']
+auto_rollback = true
+
+[build]
+image = 'actualbudget/actual-server:26.10.0'  # keep in step with deploy/actual-api/fly.toml
+
+[env]
+PORT = '5006'
+TINI_SUBREAPER = '1'
+
+[[mounts]]
+source = 'actual_data'
+destination = '/data'
+
+[[services]]
+protocol = 'tcp'
+internal_port = 5006
+processes = ['app']
+
+[[services.ports]]
+port = 80
+handlers = ['http']
+force_https = true
+
+[[services.ports]]
+port = 443
+handlers = ['tls', 'http']
+
+[services.concurrency]
+type = 'connections'
+hard_limit = 25
+soft_limit = 20
+
+[[services.tcp_checks]]
+interval = '15s'
+timeout = '2s'
+grace_period = '10s'
+
+[[vm]]
+size = 'shared-cpu-1x'

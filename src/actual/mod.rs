@@ -65,6 +65,8 @@ pub struct Transaction {
     #[serde(default)]
     pub imported_payee: Option<String>,
     #[serde(default)]
+    pub imported_id: Option<String>,
+    #[serde(default)]
     pub category: Option<String>,
     #[serde(default)]
     pub notes: Option<String>,
