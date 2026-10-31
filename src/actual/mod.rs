@@ -95,6 +95,26 @@ pub struct TransactionPatch {
     /// `Some(None)` clears the id (serializes as `null`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub imported_id: Option<Option<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payee: Option<String>,
+}
+
+/// One category's numbers for one budget month, in minor units.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct MonthCategory {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub budgeted: i64,
+    /// Spent for expense categories, received for income ones.
+    #[serde(default, alias = "received")]
+    pub spent: i64,
+    #[serde(default)]
+    pub balance: i64,
+    #[serde(default, deserialize_with = "flag")]
+    pub is_income: bool,
+    #[serde(default, deserialize_with = "flag")]
+    pub hidden: bool,
 }
 
 /// A single transaction to add without Actual's matching, used to restore rows the
@@ -193,6 +213,21 @@ pub trait ActualStore: Send + Sync {
     async fn create_rule(&self, rule: &Rule) -> Result<()>;
     /// Adds one transaction as-is: no rules, no de-duplication, no fuzzy matching.
     async fn add_transaction(&self, account_id: &str, transaction: &AddTransaction) -> Result<()>;
+    /// Pulls new rows from the bank into one account, the same way Actual's own bank sync
+    /// does. The provider may rate-limit this to a few calls per day.
+    async fn bank_sync(&self, account_id: &str) -> Result<()>;
+    /// Creates a payee and returns its id.
+    async fn create_payee(&self, name: &str) -> Result<String>;
+    async fn rename_payee(&self, id: &str, name: &str) -> Result<()>;
+    /// Moves every transaction (and rule) of `merge_ids` onto `target_id` and deletes them.
+    async fn merge_payees(&self, target_id: &str, merge_ids: &[String]) -> Result<()>;
+    /// Budgeted, spent and balance per category for one `YYYY-MM`.
+    async fn month_categories(&self, month: &str) -> Result<Vec<MonthCategory>>;
+    /// Sets the budgeted amount (minor units) of one category for one month.
+    async fn set_budgeted(&self, month: &str, category_id: &str, amount: i64) -> Result<()>;
+    /// The note on a category; empty when there is none.
+    async fn category_note(&self, category_id: &str) -> Result<String>;
+    async fn set_category_note(&self, category_id: &str, note: &str) -> Result<()>;
 }
 
 impl Snapshot {
@@ -311,6 +346,7 @@ mod tests {
             category: Some("c1".into()),
             notes: None,
             imported_id: None,
+            payee: None,
         };
         assert_eq!(
             serde_json::to_string(&patch).unwrap(),

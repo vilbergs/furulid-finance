@@ -6,7 +6,7 @@ use reqwest::header::{HeaderMap, HeaderValue};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 
-use super::{
+use super::{MonthCategory, 
     Account, ActualStore, AddTransaction, CategoryGroup, ImportOptions, ImportResult,
     NewTransaction, Payee, Rule, Transaction, TransactionPatch,
 };
@@ -219,6 +219,99 @@ impl ActualStore for HttpStore {
                 "learnCategories": false,
                 "runTransfers": false,
             }),
+        )
+        .await
+    }
+
+    async fn create_payee(&self, name: &str) -> Result<String> {
+        let value = self
+            .raw(
+                "POST",
+                "payees",
+                None,
+                Some(serde_json::json!({ "payee": { "name": name } })),
+            )
+            .await?;
+        value
+            .as_str()
+            .map(str::to_string)
+            .with_context(|| format!("creating payee {name:?}: unexpected response {value}"))
+    }
+
+    async fn rename_payee(&self, id: &str, name: &str) -> Result<()> {
+        let url = self.url(&format!("payees/{id}"));
+        let response = self
+            .client
+            .patch(&url)
+            .json(&serde_json::json!({ "payee": { "name": name } }))
+            .send()
+            .await
+            .with_context(|| format!("PATCH {url}"))?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            anyhow::bail!("PATCH {url} returned {status}: {body}");
+        }
+        Ok(())
+    }
+
+    async fn merge_payees(&self, target_id: &str, merge_ids: &[String]) -> Result<()> {
+        self.post_json(
+            "payees/merge",
+            &serde_json::json!({ "targetId": target_id, "mergeIds": merge_ids }),
+        )
+        .await
+    }
+
+    async fn month_categories(&self, month: &str) -> Result<Vec<MonthCategory>> {
+        self.get(&format!("months/{month}/categories"), &[]).await
+    }
+
+    async fn set_budgeted(&self, month: &str, category_id: &str, amount: i64) -> Result<()> {
+        let url = self.url(&format!("months/{month}/categories/{category_id}"));
+        let response = self
+            .client
+            .patch(&url)
+            .json(&serde_json::json!({ "category": { "budgeted": amount } }))
+            .send()
+            .await
+            .with_context(|| format!("PATCH {url}"))?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            anyhow::bail!("PATCH {url} returned {status}: {body}");
+        }
+        Ok(())
+    }
+
+    async fn category_note(&self, category_id: &str) -> Result<String> {
+        let value = self
+            .raw("GET", &format!("notes/category/{category_id}"), None, None)
+            .await?;
+        Ok(value.as_str().unwrap_or("").to_string())
+    }
+
+    async fn set_category_note(&self, category_id: &str, note: &str) -> Result<()> {
+        let url = self.url(&format!("notes/category/{category_id}"));
+        let response = self
+            .client
+            .put(&url)
+            .json(&serde_json::json!({ "data": note }))
+            .send()
+            .await
+            .with_context(|| format!("PUT {url}"))?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            anyhow::bail!("PUT {url} returned {status}: {body}");
+        }
+        Ok(())
+    }
+
+    async fn bank_sync(&self, account_id: &str) -> Result<()> {
+        self.post_json(
+            &format!("accounts/{account_id}/banksync"),
+            &serde_json::json!({}),
         )
         .await
     }

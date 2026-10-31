@@ -42,9 +42,14 @@ pub struct JevConfig {
     #[serde(default = "default_unsure_label")]
     pub unsure_label: String,
     /// Rubric text per category, keyed by category name. Categories without an entry
-    /// get their group name as the hint.
+    /// get their group name as the hint. Usually loaded from `rubric` instead.
     #[serde(default)]
     pub descriptions: HashMap<String, String>,
+    /// A TOML file with a `[descriptions]` table, relative to the config file. Defaults
+    /// to `rubric.toml` next to the config when that exists. Its entries override
+    /// `descriptions` above, so the rubric can be tracked while the config stays private.
+    #[serde(default)]
+    pub rubric: Option<std::path::PathBuf>,
     #[serde(default = "default_concurrency")]
     pub concurrency: usize,
     #[serde(default = "default_timeout_secs")]
@@ -74,6 +79,13 @@ pub struct TagConfig {
     pub missed: String,
 }
 
+/// The tracked rubric file: just the per-category text.
+#[derive(Debug, Deserialize)]
+struct RubricFile {
+    #[serde(default)]
+    descriptions: HashMap<String, String>,
+}
+
 /// Secrets, read from the environment so they never sit in the config file.
 #[derive(Debug, Clone)]
 pub struct Secrets {
@@ -86,8 +98,20 @@ impl Config {
     pub fn load(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("reading config {}", path.display()))?;
-        let config: Config =
+        let mut config: Config =
             toml::from_str(&text).with_context(|| format!("parsing config {}", path.display()))?;
+        let dir = path.parent().unwrap_or_else(|| Path::new("."));
+        let rubric = match &config.jev.rubric {
+            Some(p) => Some(dir.join(p)),
+            None => Some(dir.join("rubric.toml")).filter(|p| p.exists()),
+        };
+        if let Some(rubric) = rubric {
+            let text = std::fs::read_to_string(&rubric)
+                .with_context(|| format!("reading rubric {}", rubric.display()))?;
+            let file: RubricFile = toml::from_str(&text)
+                .with_context(|| format!("parsing rubric {}", rubric.display()))?;
+            config.jev.descriptions.extend(file.descriptions);
+        }
         config.validate()?;
         Ok(config)
     }
@@ -136,6 +160,7 @@ impl Default for JevConfig {
             instructions: default_instructions(),
             unsure_label: default_unsure_label(),
             descriptions: HashMap::new(),
+            rubric: None,
             concurrency: default_concurrency(),
             timeout_secs: default_timeout_secs(),
             max_retries: default_max_retries(),
@@ -222,6 +247,23 @@ mod tests {
         assert_eq!(config.policy.apply_threshold, 0.85);
         assert_eq!(config.policy.learn_after, 2);
         assert_eq!(config.tags.flagged, "#jev-flag");
+    }
+
+    #[test]
+    fn rubric_file_overrides_inline_descriptions() {
+        let dir = std::env::temp_dir().join(format!("jevcat-rubric-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("jevcat.toml"),
+            "[actual]\nbase_url = \"http://x\"\nbudget_sync_id = \"abc\"\n[jev.descriptions]\nA = \"inline\"\nB = \"inline\"\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("rubric.toml"), "[descriptions]\nA = \"file\"\nC = \"file\"\n").unwrap();
+        let config = Config::load(&dir.join("jevcat.toml")).unwrap();
+        assert_eq!(config.jev.descriptions["A"], "file");
+        assert_eq!(config.jev.descriptions["B"], "inline");
+        assert_eq!(config.jev.descriptions["C"], "file");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

@@ -1,0 +1,9 @@
+[Unit]
+Description=jevcat: pull Nordea rows into Actual and categorize them
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/sites/furulid-finance
+ExecStart=%h/.cargo/bin/jevcat sync

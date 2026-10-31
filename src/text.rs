@@ -8,12 +8,13 @@ use regex::Regex;
 use crate::actual::Transaction;
 use crate::tags;
 
-/// Prefixes Nordea puts in front of the payee. Same list as `jevcat.example.toml`.
+/// Prefixes Nordea puts in front of the payee, matched case-insensitively because Actual
+/// title-cases imported names (`Betalning Pg …`). Same list as `jevcat.example.toml`.
 pub const DEFAULT_CLEANUP: [&str; 4] = [
     r"^Kortköp \d{6} ",
     r"^Swish (in)?betalning ",
     r"^Autogiro ",
-    r"^(Betalning|Open Banking) BG [\d-]+ ",
+    r"^(Betalning|Open Banking) (BG|PG) [\d-]+ ",
 ];
 
 fn cleanup() -> &'static [Regex] {
@@ -21,7 +22,7 @@ fn cleanup() -> &'static [Regex] {
     PATTERNS.get_or_init(|| {
         DEFAULT_CLEANUP
             .iter()
-            .map(|p| Regex::new(p).expect("static regex"))
+            .map(|p| Regex::new(&format!("(?i){p}")).expect("static regex"))
             .collect()
     })
 }

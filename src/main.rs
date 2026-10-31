@@ -1,4 +1,5 @@
 mod actual;
+mod budget;
 mod calibrate;
 mod classify;
 mod config;
@@ -6,9 +7,11 @@ mod filter;
 mod gap;
 mod import;
 mod learn;
+mod payees;
 mod policy;
 #[cfg(test)]
 mod preflight;
+mod report;
 mod review;
 mod run;
 mod tags;
@@ -21,7 +24,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use tracing::info;
+use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 use crate::actual::http::HttpStore;
@@ -141,6 +144,56 @@ enum Command {
         #[arg(long)]
         account: Option<String>,
     },
+    /// Give synced rows a proper payee: merge the per-day `Kortköp 260817 X` payees into
+    /// one, and point reference-number rows at a payee taken from their notes.
+    Payees {
+        /// Print the plan without writing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Actual account name or id. Defaults to `import.account` or the only account.
+        #[arg(long)]
+        account: Option<String>,
+    },
+    /// Spending, income, budget and recurring charges per month: the numbers advice
+    /// starts from.
+    Report {
+        /// How many months back, including the current one.
+        #[arg(long, default_value_t = 6)]
+        months: u32,
+        /// Actual account name or id. Defaults to `import.account` or the only account.
+        #[arg(long)]
+        account: Option<String>,
+    },
+    /// Fill a month's budget from `#template <kr>` notes on the categories, the same
+    /// notes Actual's own "apply budget template" reads. Categories already budgeted are
+    /// left alone unless --force.
+    Budget {
+        /// Month to fill (YYYY-MM). Defaults to the current and the next month.
+        #[arg(long)]
+        month: Option<String>,
+        /// Overwrite amounts that are already set.
+        #[arg(long)]
+        force: bool,
+        #[arg(long)]
+        dry_run: bool,
+        /// Show the templates and stop.
+        #[arg(long)]
+        list: bool,
+        /// Write a template: `--set "Groceries=9500"`. Repeatable.
+        #[arg(long = "set", value_name = "NAME=KR")]
+        set_templates: Vec<String>,
+    },
+    /// Pull new rows from the bank, clean their payees, categorize what is uncategorized
+    /// and fill the budget from templates. Writes unless --dry-run is given; made for a
+    /// weekly schedule (see README). Pings JEVCAT_HEALTHCHECK_URL when set.
+    Sync {
+        /// Sync and classify, but write nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Actual account name or id. Defaults to `import.account` or the only account.
+        #[arg(long)]
+        account: Option<String>,
+    },
     /// Call actual-http-api directly: `jevcat api accounts`, `jevcat api -X PATCH
     /// transactions/<id> '{"transaction":{"notes":"x"}}'`.
     Api {
@@ -193,6 +246,12 @@ async fn main() -> Result<()> {
         let value = store.raw(method, path, query, body).await?;
         println!("{}", serde_json::to_string_pretty(&value)?);
         return Ok(());
+    }
+
+    if let Command::Sync { .. } = &cli.command {
+        let outcome = sync_and_run(&cli, &config, &secrets, &store).await;
+        ping_healthcheck(outcome.is_ok()).await;
+        return outcome;
     }
 
     let since = since_date(config.actual.since_days);
@@ -269,6 +328,80 @@ async fn main() -> Result<()> {
             )
             .await?;
             print!("{}", summary.render(apply));
+        }
+        Command::Sync { .. } => unreachable!("handled above"),
+        Command::Payees { dry_run, account } => {
+            let account = pick_account(&snapshot, &config, account.as_deref())?;
+            let plan = payees::plan(&snapshot.payees, &snapshot.transactions);
+            if dry_run {
+                println!("Dry run: nothing is written.\n");
+            }
+            let _ = account;
+            let (merges, sets) = payees::apply(&store as &dyn ActualStore, &plan, dry_run).await?;
+            let verb = if dry_run { "would change" } else { "changed" };
+            println!("\n{verb} {merges} payees and {sets} transactions");
+        }
+        Command::Report { months, account } => {
+            let account = pick_account(&snapshot, &config, account.as_deref())?;
+            let months = report::month_list(months.max(1));
+            let mut per_month = Vec::new();
+            for m in &months {
+                per_month.push(store.month_categories(m).await?);
+            }
+            let transactions = store
+                .transactions(&account.id, &format!("{}-01", months[0]))
+                .await?;
+            let text = report::render(&report::Input {
+                months: &months,
+                per_month: &per_month,
+                transactions: &transactions,
+                payee_names: &snapshot.payee_names(),
+            });
+            print!("{text}");
+        }
+        Command::Budget {
+            month,
+            force,
+            dry_run,
+            list,
+            set_templates,
+        } => {
+            if !set_templates.is_empty() {
+                let n = budget::set_templates(
+                    &store as &dyn ActualStore,
+                    &snapshot.groups,
+                    &set_templates,
+                    dry_run,
+                )
+                .await?;
+                println!("{n} templates {}", if dry_run { "would be written" } else { "written" });
+            }
+            let templates = budget::templates(&store as &dyn ActualStore, &snapshot.groups).await?;
+            if list || templates.is_empty() {
+                for t in &templates {
+                    println!("{:<24} {:>8}", t.name, t.amount / 100);
+                }
+                println!(
+                    "{} templates, {} kr/month",
+                    templates.len(),
+                    templates.iter().map(|t| t.amount).sum::<i64>() / 100
+                );
+                if list || templates.is_empty() {
+                    return Ok(());
+                }
+            }
+            let months = match month {
+                Some(m) => vec![m],
+                None => {
+                    let now = report::month_list(1).remove(0);
+                    vec![now.clone(), report::next_month(&now)]
+                }
+            };
+            for m in &months {
+                let (set, kept) =
+                    budget::apply(&store as &dyn ActualStore, &templates, m, force, dry_run).await?;
+                println!("{m}: {set} set, {kept} left as they were");
+            }
         }
         Command::Learn { apply, after } => {
             let learn_after = after.unwrap_or(config.policy.learn_after).max(1);
@@ -614,8 +747,109 @@ async fn import_csv(
     Ok(())
 }
 
+/// The weekly job: bank pull, payee cleanup, classification, budget templates.
+async fn sync_and_run(
+    cli: &Cli,
+    config: &Config,
+    secrets: &Secrets,
+    store: &HttpStore,
+) -> Result<()> {
+    let Command::Sync { dry_run, account } = &cli.command else {
+        unreachable!("sync only")
+    };
+    let dry_run = *dry_run;
+    let accounts = store.accounts().await?;
+    let account = pick_account_from(&accounts, config, account.as_deref())?;
+    info!(account = %account.name, "bank sync");
+    // A failed pull (rate limit, bank down) should not stop the rest.
+    if let Err(error) = store.bank_sync(&account.id).await {
+        warn!(%error, "bank sync failed, continuing with what is in Actual");
+    }
+    if dry_run {
+        println!("Dry run: nothing is written.\n");
+    }
+
+    let since = since_date(config.actual.since_days);
+    let mut snapshot = Snapshot::load(store, &since).await?;
+    let plan = payees::plan(&snapshot.payees, &snapshot.transactions);
+    let (merges, sets) = payees::apply(store as &dyn ActualStore, &plan, dry_run).await?;
+    if merges + sets > 0 {
+        println!("payees: {merges} merged or renamed, {sets} rows re-pointed\n");
+        if !dry_run {
+            // Rows now point at other payees; Jev should see the clean names.
+            snapshot = Snapshot::load(store, &since).await?;
+        }
+    }
+
+    let taxonomy = Taxonomy::from_groups(
+        &snapshot.groups,
+        &config.jev.descriptions,
+        &config.jev.unsure_label,
+    );
+    let classifier = classifier(config, secrets)?;
+    let options = run::RunOptions {
+        apply: !dry_run,
+        rerun_missed: false,
+        apply_threshold: config.policy.apply_threshold,
+        concurrency: config.jev.concurrency,
+        only_ids: None,
+        learn_after: config.policy.learn_after,
+    };
+    let summary = run::run(
+        store as &dyn ActualStore,
+        &snapshot,
+        &taxonomy,
+        classifier,
+        &config.tags,
+        &options,
+    )
+    .await?;
+    print!("{}", summary.render(!dry_run));
+
+    let templates = budget::templates(store as &dyn ActualStore, &snapshot.groups).await?;
+    if !templates.is_empty() {
+        let now = report::month_list(1).remove(0);
+        for m in [now.clone(), report::next_month(&now)] {
+            let (set, kept) =
+                budget::apply(store as &dyn ActualStore, &templates, &m, false, dry_run).await?;
+            println!("budget {m}: {set} set from templates, {kept} left as they were");
+        }
+    }
+    Ok(())
+}
+
+/// Dead man's switch: GET `JEVCAT_HEALTHCHECK_URL` after a run, `<url>/fail` after a
+/// failed one. Unset means no ping. Errors here are logged, never fatal.
+async fn ping_healthcheck(ok: bool) {
+    let Some(url) = std::env::var("JEVCAT_HEALTHCHECK_URL")
+        .ok()
+        .filter(|u| !u.trim().is_empty())
+    else {
+        return;
+    };
+    let url = if ok { url } else { format!("{}/fail", url.trim_end_matches('/')) };
+    match reqwest::Client::new()
+        .get(&url)
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await
+    {
+        Ok(response) if response.status().is_success() => info!("healthcheck pinged"),
+        Ok(response) => warn!(status = %response.status(), "healthcheck ping rejected"),
+        Err(error) => warn!(%error, "healthcheck ping failed"),
+    }
+}
+
 fn pick_account<'a>(
     snapshot: &'a Snapshot,
+    config: &Config,
+    name: Option<&str>,
+) -> Result<&'a Account> {
+    pick_account_from(&snapshot.accounts, config, name)
+}
+
+fn pick_account_from<'a>(
+    accounts: &'a [Account],
     config: &Config,
     name: Option<&str>,
 ) -> Result<&'a Account> {
@@ -624,12 +858,15 @@ fn pick_account<'a>(
         .as_ref()
         .and_then(|import| import.account.as_deref()));
     match name {
-        Some(name) => snapshot.account(name).with_context(|| {
-            let names: Vec<&str> = snapshot.accounts.iter().map(|a| a.name.as_str()).collect();
-            format!("no account {name:?}; accounts are {names:?}")
-        }),
+        Some(name) => accounts
+            .iter()
+            .find(|a| a.id == name || a.name.eq_ignore_ascii_case(name))
+            .with_context(|| {
+                let names: Vec<&str> = accounts.iter().map(|a| a.name.as_str()).collect();
+                format!("no account {name:?}; accounts are {names:?}")
+            }),
         None => {
-            let open: Vec<&Account> = snapshot.accounts.iter().filter(|a| !a.closed).collect();
+            let open: Vec<&Account> = accounts.iter().filter(|a| !a.closed).collect();
             anyhow::ensure!(
                 open.len() == 1,
                 "pass --account; accounts are {:?}",

@@ -63,6 +63,7 @@ pub fn patch_for(action: &Action, tx: &Transaction, tags: &TagConfig) -> Transac
             category: Some(category_id.clone()),
             notes: Some(tags::with_tag(notes, &prefix, &tags.applied, None)),
             imported_id: None,
+            payee: None,
         },
         Action::Flag { label, confidence } => TransactionPatch {
             category: None,
@@ -73,11 +74,13 @@ pub fn patch_for(action: &Action, tx: &Transaction, tags: &TagConfig) -> Transac
                 Some(&format!("{label} {confidence:.2}")),
             )),
             imported_id: None,
+            payee: None,
         },
         Action::Skip { .. } => TransactionPatch {
             category: None,
             notes: Some(tags::with_tag(notes, &prefix, &tags.missed, None)),
             imported_id: None,
+            payee: None,
         },
     }
 }
@@ -381,6 +384,7 @@ mod tests {
                 category: Some("c1".into()),
                 notes: Some("weekly #jev".into()),
             imported_id: None,
+            payee: None,
             }
         );
 
@@ -394,6 +398,7 @@ mod tests {
                 category: None,
                 notes: Some("weekly #jev-flag [jev: Groceries 0.70]".into()),
             imported_id: None,
+            payee: None,
             }
         );
 
@@ -407,6 +412,7 @@ mod tests {
                 category: None,
                 notes: Some("#jev-miss".into()),
             imported_id: None,
+            payee: None,
             }
         );
     }

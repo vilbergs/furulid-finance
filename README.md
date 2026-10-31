@@ -6,12 +6,16 @@ question with a calibrated confidence instead of generating text. Every category
 option, `Unsure` is always one of them, and the confidence decides whether a category is
 written, flagged for review, or left alone.
 
-Run it by hand. There is no daemon and no schedule.
+Run it by hand, or put `jevcat sync` on a schedule (`deploy/pi/` has a systemd timer).
 
 ```
 jevcat import statement.csv      import a bank CSV into Actual, then categorize what it added
 jevcat run                       categorize what is already uncategorized (dry run)
 jevcat run --apply               ...and write it
+jevcat sync                      pull from the bank, clean payees, categorize, fill the budget; the weekly job
+jevcat payees                    merge per-day `Kortköp 260817 X` payees, name reference-number rows from notes
+jevcat report                    spending, income, budget and recurring charges per month
+jevcat budget                    fill the current and next month from `#template <kr>` category notes
 jevcat calibrate                 measure accuracy per confidence on your categorized history
 jevcat learn --apply             turn payees Jev has placed consistently into Actual rules
 jevcat list                      show what a run would look at, without calling Jev
@@ -21,6 +25,59 @@ jevcat api accounts              call actual-http-api directly
 ```
 
 `--since-days N` before any command widens the look-back for that call.
+
+## Cleaning payees
+
+Bank sync keeps the bank's payee text, so every card purchase becomes its own payee
+(`Kortköp 260817 DISNEY PLUS`) and Bankgiro or Autogiro rows arrive under a nine-digit
+reference number with the real description in notes. `jevcat payees` fixes both: a raw
+merchant payee is merged into the payee of the cleaned name (rules follow the merge) or
+renamed when none exists, and each reference-number row is pointed at a payee taken from
+its notes. `sync` runs it on every pull. `--since-days 3650 payees --dry-run` shows what a
+full-history pass would do.
+
+## Reports and budget templates
+
+`jevcat report --months 6` prints spending per category per month with the average and
+the current budget, income per month, the current month against its budget, and every
+payee charged in three or more months with its monthly cost and anything odd: a charge
+that stopped, one billed twice a month at the same amount, two payees that look like the
+same service.
+
+Budgets come from `#template <kr>` in a category's note, the same note Actual's own
+"apply budget template" reads. `jevcat budget --set "Groceries=9500"` writes one,
+`--list` shows them all, and `jevcat budget` fills the current and next month, leaving
+any amount already set unless `--force`. `sync` does the fill too, so a new month is
+budgeted before anyone opens Actual.
+
+## The rubric
+
+Jev reads one line per category from `rubric.toml` next to the config. It is tracked in
+git; `jevcat.toml` holds only the endpoint, policy and import settings and stays private.
+Entries in the rubric file override any `[jev.descriptions]` left in the config.
+
+## Running it weekly
+
+`jevcat sync` asks Actual to pull from the bank (the same sync the Actual UI runs), cleans
+the payees of what arrived, classifies whatever is uncategorized, writes the result and
+fills the current and next month from the budget templates. A failed pull is logged and
+the rest still runs. Set `JEVCAT_HEALTHCHECK_URL` in `.env` to a check URL (healthchecks.io
+or similar) and every run pings it, `/fail` appended after an error, so a job that stops
+running gets noticed. The endpoint answers "Bank sync started" even when the account
+has no bank link, in which case only the classification does anything.
+
+On any Linux box with systemd (a Raspberry Pi works), `deploy/pi/install.sh user@host`
+copies the repo including the gitignored `jevcat.toml` and `.env`, installs Rust if needed,
+builds jevcat and enables a user timer for Mondays 07:30 that catches up after downtime.
+Put `JEVCAT_SYNC_HOST=user@host` in `.env` to leave the argument out:
+
+```sh
+deploy/pi/install.sh
+ssh "$JEVCAT_SYNC_HOST" journalctl --user -u jevcat-sync -n 20    # last run
+ssh "$JEVCAT_SYNC_HOST" systemctl --user start jevcat-sync        # run now
+```
+
+Re-run the script to deploy a new build.
 
 ## How it reaches Actual
 

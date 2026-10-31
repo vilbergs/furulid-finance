@@ -1,0 +1,11 @@
+[Unit]
+Description=Run jevcat sync every Monday 07:30
+
+[Timer]
+OnCalendar=Mon 07:30
+# If the Pi was off at 07:30, run as soon as it is back.
+Persistent=true
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target

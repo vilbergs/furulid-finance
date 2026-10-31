@@ -57,5 +57,5 @@ payee_cleanup = [
   '^Kortköp \d{6} ',
   '^Swish (in)?betalning ',
   '^Autogiro ',
-  '^(Betalning|Open Banking) BG [\d-]+ ',
+  '^(Betalning|Open Banking) (BG|PG) [\d-]+ ',
 ]

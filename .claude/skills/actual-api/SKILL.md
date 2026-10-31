@@ -58,8 +58,12 @@ duplicates). See the `review-categories` and `fill-gap` skills.
 | `months` | list of month strings the budget covers |
 | `months/<YYYY-MM>` | totals: `totalBudgeted`, `totalIncome`, `toBudget`, ... |
 | `months/<YYYY-MM>/categories` | per category `budgeted`, `spent`, `balance` for the month |
+| `months/<YYYY-MM>/categories/<category id>` (PATCH, body `{"category": {"budgeted": <öre>}}`) | set the budgeted amount; `carryover` is the other accepted field. Income categories have no `budgeted` key in the GET response |
 | `payees` | payees with `transfer_acct`; POST `{"payee":{"name":...}}` creates, DELETE `payees/<id>` removes |
+| `payees/merge` (POST, `{"targetId", "mergeIds": [...]}`) | moves the merged payees' transactions and rules onto the target and deletes them; `jevcat payees` uses it |
+| `notes/category/<id>` (GET, PUT `{"data": "..."}`, DELETE) | the category note; `#template <kr>` lines in it drive `jevcat budget` |
 | `rules` | rules with `conditions` and `actions`; PATCH `rules/<id>` updates |
+| `accounts/<id>/banksync` (POST, empty body) | pulls new rows from the bank (Enable Banking since 2026-10-11); `jevcat sync` wraps it. Answers "Bank sync started" even with no link |
 
 The add endpoint takes one transaction per call under `transaction`; a `transactions`
 array returns `transaction information is required`.
