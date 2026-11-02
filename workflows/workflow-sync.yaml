@@ -1,0 +1,96 @@
+id: 083683e2-df16-40d8-89b0-48706d7ec534
+name: sync
+description: >-
+  The weekly jevcat run: pull new rows from the bank, clean payees, categorize
+  with Jev, fill the budget from templates, then check how much spending is
+  still uncategorized and keep a one-month report as the run's record.
+  Secrets come from the default vault; jevcat.toml is read from the repo root.
+version: 1
+vaults: [default]
+inputs:
+  properties:
+    dryRun:
+      type: boolean
+      default: false
+      description: Sync and classify but write nothing to Actual
+    maxOpenShare:
+      type: number
+      default: 5
+      description: Fail the run when more than this percent of spending in the window is uncategorized
+jobs:
+  - name: sync
+    description: Bank pull, payees, Jev, budget
+    steps:
+      - name: jevcat-sync
+        description: jevcat sync (bank pull, payee cleanup, categorize, budget templates)
+        task:
+          type: behavior
+          behaviorType: command/shell
+          behaviorName: jevcat-sync
+          methodName: execute
+          inputs:
+            run: jevcat sync $JEVCAT_SYNC_FLAGS
+            timeout: 900000
+            env:
+              JEVCAT_SYNC_FLAGS: '${{ inputs.dryRun ? "--dry-run" : "" }}'
+              ACTUAL_HTTP_API_KEY: ${{ vault.get(default, ACTUAL_HTTP_API_KEY) }}
+              TYPESAFE_API_KEY: ${{ vault.get(default, TYPESAFE_API_KEY) }}
+              ACTUAL_SERVER_APP: ${{ vault.get(default, ACTUAL_SERVER_APP) }}
+              ACTUAL_API_APP: ${{ vault.get(default, ACTUAL_API_APP) }}
+  - name: check
+    description: What is still open, and the month so far
+    dependsOn:
+      - job: sync
+        condition:
+          type: succeeded
+    steps:
+      - name: jevcat-open
+        description: Uncategorized rows; stdout is the share of spending, the table goes to stderr
+        task:
+          type: behavior
+          behaviorType: command/shell
+          behaviorName: jevcat-open
+          methodName: execute
+          inputs:
+            run: >-
+              out=$(jevcat open) || exit 1;
+              printf '%s\n' "$out" >&2;
+              share=$(printf '%s\n' "$out" | sed -n 's/^uncategorized share of spending in the window: \([0-9.]*\)%$/\1/p');
+              printf '%s' "${share:-0}"
+            timeout: 120000
+            env:
+              ACTUAL_HTTP_API_KEY: ${{ vault.get(default, ACTUAL_HTTP_API_KEY) }}
+              TYPESAFE_API_KEY: ${{ vault.get(default, TYPESAFE_API_KEY) }}
+              ACTUAL_SERVER_APP: ${{ vault.get(default, ACTUAL_SERVER_APP) }}
+              ACTUAL_API_APP: ${{ vault.get(default, ACTUAL_API_APP) }}
+      - name: open-share-ok
+        description: Advice on a budget with more than a few percent uncategorized is advice on a guess
+        dependsOn:
+          - step: jevcat-open
+            condition:
+              type: succeeded
+        task:
+          type: assert
+          expr: >-
+            double(data.latest("jevcat-open", "result").attributes.stdout) <= inputs.maxOpenShare
+          message: "Uncategorized share of spending is above the limit; run the review-categories skill"
+          severity: high
+      - name: jevcat-report
+        description: This month against budget, as the run's record
+        dependsOn:
+          - step: jevcat-open
+            condition:
+              type: succeeded
+        task:
+          type: behavior
+          behaviorType: command/shell
+          behaviorName: jevcat-report
+          methodName: execute
+          inputs:
+            run: jevcat report --months 1
+            timeout: 120000
+            env:
+              ACTUAL_HTTP_API_KEY: ${{ vault.get(default, ACTUAL_HTTP_API_KEY) }}
+              TYPESAFE_API_KEY: ${{ vault.get(default, TYPESAFE_API_KEY) }}
+              ACTUAL_SERVER_APP: ${{ vault.get(default, ACTUAL_SERVER_APP) }}
+              ACTUAL_API_APP: ${{ vault.get(default, ACTUAL_API_APP) }}
