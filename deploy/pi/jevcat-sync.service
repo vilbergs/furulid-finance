@@ -6,4 +6,13 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 WorkingDirectory=%h/sites/furulid-finance
-ExecStart=%h/.cargo/bin/jevcat sync
+# The shell steps of the workflow call `jevcat` by name; swamp lives in ~/.local/bin.
+Environment=PATH=%h/.cargo/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+# swamp needs an account even for a local run. The key file is written by hand on the Pi
+# (chmod 600) and never leaves it.
+Environment=SWAMP_API_KEY_FILE=%h/.config/swamp/api-key
+Environment=SWAMP_NO_INBOX_NOTICE=1
+# The Swamp workflow is the same job with a run record and an assert on the uncategorized
+# share. If swamp cannot run at all (no key, expired account, bad binary) the plain
+# command still does Monday's work; the journal shows which one ran.
+ExecStart=/bin/sh -c 'swamp workflow run sync || { echo "swamp failed, falling back to jevcat sync"; jevcat sync; }'

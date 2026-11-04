@@ -93,7 +93,9 @@ a small home server; the same job also exists as the Swamp workflow `sync`
 nothing), which reads the secrets from Swamp's `default` vault (per machine, filled from
 `.env` with `swamp vault put default KEY`), asserts the uncategorized share stays under
 `maxOpenShare` percent and keeps a one-month report as the run's record. Step timeouts in
-`command/shell` are milliseconds. The timer is the one that runs today; its SSH address is `JEVCAT_SYNC_HOST` in `.env` and must not be
+`command/shell` are milliseconds. The Pi's service runs that workflow and falls back to plain
+`jevcat sync` when swamp cannot start (its API key lives only in `~/.config/swamp/api-key` on
+the Pi; the journal says which path ran); its SSH address is `JEVCAT_SYNC_HOST` in `.env` and must not be
 written anywhere tracked. Deploy with `deploy/pi/install.sh`, read the log with
 `journalctl --user -u jevcat-sync` there. The server carries its own copy of `jevcat.toml`
 and `.env`; re-run the install script after changing them. The bank link moved from
