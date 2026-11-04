@@ -2,8 +2,8 @@ id: 02586a45-e829-42c1-b5e9-0b459ccb2198
 name: stock-watch
 description: >-
   One look at a share on Avanza's public market-guide endpoint. The quote step
-  prints the quote as one JSON object on stdout (last, bid, ask, high, low,
-  volume, market state) and a one-line summary on stderr, so every run is a
+  prints the quote as one JSON object on stdout (last, best buy and sell,
+  high, low, volume, market state) and a one-line summary on stderr, so every run is a
   record of the price. The publish step posts quote and trades to the HQ
   dashboard's Markets tab (POST /api/markets) unless `dashboard` is empty.
   The trades step lists today's trades at the target price or better (at or
@@ -53,7 +53,7 @@ jobs:
               import json, sys, datetime
               d = json.load(sys.stdin); q = d["quote"]; m = d["marketPlace"]
               t = datetime.datetime.fromtimestamp(q["timeOfLast"] / 1000).strftime("%H:%M:%S")
-              print(d["name"], "last", q["last"], "at", t, "bid", q["buy"], "ask", q["sell"], "high", q["highest"], "low", q["lowest"], "vol", int(q["totalVolumeTraded"]), "market", m["currentStatus"], file=sys.stderr)
+              print(d["name"], "last", q["last"], "at", t, "buy", q["buy"], "sell", q["sell"], "high", q["highest"], "low", q["lowest"], "vol", int(q["totalVolumeTraded"]), "market", m["currentStatus"], file=sys.stderr)
               print(json.dumps({"id": d["orderbookId"], "name": d["name"], "ticker": d["listing"]["tickerSymbol"], "currency": d["listing"]["currency"], "last": q["last"], "bid": q["buy"], "ask": q["sell"], "high": q["highest"], "low": q["lowest"], "change_percent": q["changePercent"], "volume": int(q["totalVolumeTraded"]), "time_of_last": t, "market": m["currentStatus"], "url": "https://www.avanza.se/aktier/om-aktien.html/" + d["orderbookId"]}, ensure_ascii=False), end="")
               '
             timeout: 30000
