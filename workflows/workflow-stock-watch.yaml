@@ -2,8 +2,10 @@ id: 02586a45-e829-42c1-b5e9-0b459ccb2198
 name: stock-watch
 description: >-
   One look at a share on Avanza's public market-guide endpoint. The quote step
-  prints the last traded price on stdout and a one-line summary (bid, ask, high,
-  low, volume, market state) on stderr, so every run is a record of the price.
+  prints the quote as one JSON object on stdout (last, bid, ask, high, low,
+  volume, market state) and a one-line summary on stderr, so every run is a
+  record of the price. The publish step posts quote and trades to the HQ
+  dashboard's Markets tab (POST /api/markets) unless `dashboard` is empty.
   The trades step lists today's trades at the target price or better (at or
   above it for a sell order, at or below for a buy order) since a given time,
   and prints their total volume on stdout; the assert passes once that volume
@@ -30,12 +32,16 @@ inputs:
       type: string
       default: "09:00"
       description: Count trades from this local time today (HH:MM), normally when the order was placed
+    dashboard:
+      type: string
+      default: "https://hq.vilberg.dev"
+      description: HQ dashboard base URL to post the result to; empty skips the publish step
   required: [target]
 jobs:
   - name: watch
     steps:
       - name: quote
-        description: Last price on stdout, summary line on stderr
+        description: Quote as JSON on stdout, summary line on stderr
         task:
           type: behavior
           behaviorType: command/shell
@@ -48,7 +54,7 @@ jobs:
               d = json.load(sys.stdin); q = d["quote"]; m = d["marketPlace"]
               t = datetime.datetime.fromtimestamp(q["timeOfLast"] / 1000).strftime("%H:%M:%S")
               print(d["name"], "last", q["last"], "at", t, "bid", q["buy"], "ask", q["sell"], "high", q["highest"], "low", q["lowest"], "vol", int(q["totalVolumeTraded"]), "market", m["currentStatus"], file=sys.stderr)
-              print(q["last"], end="")
+              print(json.dumps({"id": d["orderbookId"], "name": d["name"], "ticker": d["listing"]["tickerSymbol"], "currency": d["listing"]["currency"], "last": q["last"], "bid": q["buy"], "ask": q["sell"], "high": q["highest"], "low": q["lowest"], "change_percent": q["changePercent"], "volume": int(q["totalVolumeTraded"]), "time_of_last": t, "market": m["currentStatus"], "url": "https://www.avanza.se/aktier/om-aktien.html/" + d["orderbookId"]}, ensure_ascii=False), end="")
               '
             timeout: 30000
             env:
@@ -87,6 +93,39 @@ jobs:
               TARGET: ${{ string(inputs.target) }}
               SIDE: ${{ inputs.side }}
               SINCE: ${{ inputs.since }}
+      - name: publish
+        description: Post the quote and the trades at target to the HQ dashboard's Markets tab
+        guard: ${{ inputs.dashboard == "" }}
+        allowFailure: true
+        dependsOn:
+          - step: trades
+            condition:
+              type: succeeded
+        task:
+          type: behavior
+          behaviorType: command/shell
+          behaviorName: publish
+          methodName: execute
+          inputs:
+            run: |
+              payload=$(python3 -c '
+              import json, os
+              q = json.loads(os.environ["QUOTE"])
+              q.update({"target": float(os.environ["TARGET"]), "side": os.environ["SIDE"], "since": os.environ["SINCE"],
+                        "traded_at_target": int(os.environ["TRADED"] or 0),
+                        "trades": [l.strip() for l in os.environ["TRADE_LINES"].splitlines() if l.strip()],
+                        "source": "swamp stock-watch"})
+              print(json.dumps(q, ensure_ascii=False))
+              ') && curl -sf --max-time 20 -X POST -H 'Content-Type: application/json' --data-binary "$payload" "${DASHBOARD%/}/api/markets"
+            timeout: 30000
+            env:
+              DASHBOARD: ${{ inputs.dashboard }}
+              TARGET: ${{ string(inputs.target) }}
+              SIDE: ${{ inputs.side }}
+              SINCE: ${{ inputs.since }}
+              QUOTE: ${{ data.latest("quote", "result").attributes.stdout }}
+              TRADED: ${{ data.latest("trades", "result").attributes.stdout }}
+              TRADE_LINES: ${{ data.latest("trades", "result").attributes.stderr }}
       - name: target-reached
         description: Fails until something has traded at the target or better since the given time
         dependsOn:
