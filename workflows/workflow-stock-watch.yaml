@@ -1,0 +1,101 @@
+id: 02586a45-e829-42c1-b5e9-0b459ccb2198
+name: stock-watch
+description: >-
+  One look at a share on Avanza's public market-guide endpoint. The quote step
+  prints the last traded price on stdout and a one-line summary (bid, ask, high,
+  low, volume, market state) on stderr, so every run is a record of the price.
+  The trades step lists today's trades at the target price or better (at or
+  above it for a sell order, at or below for a buy order) since a given time,
+  and prints their total volume on stdout; the assert passes once that volume
+  is above zero, which is when an order at that price can have been filled.
+  Run it on a loop or a timer to watch an open order. Uses command/shell
+  because no published behavior type does a JSON GET yet. Avanza's public feed
+  is delayed about 15 minutes.
+version: 1
+inputs:
+  properties:
+    orderbookId:
+      type: string
+      default: "636195"
+      description: Avanza orderbook id, the number in the om-aktien URL (636195 is Sjöstrand Coffee B)
+    target:
+      type: number
+      description: Price the last trade is compared with
+    side:
+      type: string
+      enum: [sell, buy]
+      default: sell
+      description: sell counts trades at or above the target, buy at or below it
+    since:
+      type: string
+      default: "09:00"
+      description: Count trades from this local time today (HH:MM), normally when the order was placed
+  required: [target]
+jobs:
+  - name: watch
+    steps:
+      - name: quote
+        description: Last price on stdout, summary line on stderr
+        task:
+          type: behavior
+          behaviorType: command/shell
+          behaviorName: quote
+          methodName: execute
+          inputs:
+            run: |
+              curl -sf --max-time 20 -H 'Accept: application/json' "https://www.avanza.se/_api/market-guide/stock/$ORDERBOOK_ID" | python3 -c '
+              import json, sys, datetime
+              d = json.load(sys.stdin); q = d["quote"]; m = d["marketPlace"]
+              t = datetime.datetime.fromtimestamp(q["timeOfLast"] / 1000).strftime("%H:%M:%S")
+              print(d["name"], "last", q["last"], "at", t, "bid", q["buy"], "ask", q["sell"], "high", q["highest"], "low", q["lowest"], "vol", int(q["totalVolumeTraded"]), "market", m["currentStatus"], file=sys.stderr)
+              print(q["last"], end="")
+              '
+            timeout: 30000
+            env:
+              ORDERBOOK_ID: ${{ inputs.orderbookId }}
+      - name: trades
+        description: Volume traded at the target or better since the given time on stdout, the trades on stderr
+        dependsOn:
+          - step: quote
+            condition:
+              type: succeeded
+        task:
+          type: behavior
+          behaviorType: command/shell
+          behaviorName: trades
+          methodName: execute
+          inputs:
+            run: |
+              curl -sf --max-time 20 -H 'Accept: application/json' "https://www.avanza.se/_api/market-guide/stock/$ORDERBOOK_ID/trades" | python3 -c '
+              import json, sys, datetime, os
+              target = float(os.environ["TARGET"]); side = os.environ["SIDE"]
+              h, m = os.environ["SINCE"].split(":")
+              since = datetime.datetime.now().replace(hour=int(h), minute=int(m), second=0, microsecond=0)
+              total = 0
+              for t in json.load(sys.stdin):
+                  if t.get("cancelled"): continue
+                  when = datetime.datetime.fromtimestamp(t["dealTime"] / 1000)
+                  ok = t["price"] >= target if side == "sell" else t["price"] <= target
+                  if when >= since and ok:
+                      total += t["volume"]
+                      print(when.strftime("%H:%M:%S"), int(t["volume"]), "at", t["price"], t["buyerName"], "<-", t["sellerName"], file=sys.stderr)
+              print(int(total), end="")
+              '
+            timeout: 30000
+            env:
+              ORDERBOOK_ID: ${{ inputs.orderbookId }}
+              TARGET: ${{ string(inputs.target) }}
+              SIDE: ${{ inputs.side }}
+              SINCE: ${{ inputs.since }}
+      - name: target-reached
+        description: Fails until something has traded at the target or better since the given time
+        dependsOn:
+          - step: trades
+            condition:
+              type: succeeded
+        task:
+          type: assert
+          expr: >-
+            double(data.latest("trades", "result").attributes.stdout) > 0.0
+          message: "Nothing has traded at the target or better since the given time"
+          severity: low
