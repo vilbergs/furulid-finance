@@ -1,0 +1,132 @@
+id: 3a239b89-0958-4740-b805-8d220218caea
+name: invest
+description: >-
+  Investment plan sized to the household. Runs the sync workflow first so the
+  budget includes the latest bank rows (skip with syncBank=false), takes the
+  budget as JSON (jevcat report --json) and hands it to the trader in
+  ../trader, then asks the trader for a plan: how much to invest now and per
+  month, and where. The plan's JSON is the run's record, and an assert checks
+  that the buys it suggests fit the money it says is there. Runs on the
+  desktop only: the trader's database and config (~/.config/trader.env) and
+  the Claude CLI that writes the plan live there.
+version: 1
+vaults: [default]
+inputs:
+  properties:
+    syncBank:
+      type: boolean
+      default: true
+      description: Run the sync workflow first (bank pull, payees, Jev, budget) so new rows count
+    months:
+      type: number
+      default: 6
+      description: Months of budget history the averages are taken over, including the current one
+jobs:
+  - name: bank
+    description: The weekly sync, so money moved since Monday is in the budget
+    steps:
+      - name: sync
+        description: The sync workflow (bank pull, payees, Jev, budget, open-share check)
+        guard: ${{ !inputs.syncBank }}
+        task:
+          type: workflow
+          workflowIdOrName: sync
+  - name: budget
+    description: The household's numbers, from the budget to the trader
+    dependsOn:
+      - job: bank
+        condition:
+          type: or
+          conditions:
+            - type: succeeded
+            - type: skipped
+    steps:
+      - name: budget-snapshot
+        description: jevcat report --json; stdout is the snapshot in whole kronor
+        task:
+          type: behavior
+          behaviorType: command/shell
+          behaviorName: budget-snapshot
+          methodName: execute
+          inputs:
+            run: jevcat report --months "$MONTHS" --json
+            timeout: 120000
+            env:
+              MONTHS: ${{ string(int(inputs.months)) }}
+              ACTUAL_HTTP_API_KEY: ${{ vault.get(default, ACTUAL_HTTP_API_KEY) }}
+              TYPESAFE_API_KEY: ${{ vault.get(default, TYPESAFE_API_KEY) }}
+      - name: trader-household
+        description: Import the snapshot into the trader; stdout is what its verdicts now see
+        dependsOn:
+          - step: budget-snapshot
+            condition:
+              type: succeeded
+        task:
+          type: behavior
+          behaviorType: command/shell
+          behaviorName: trader-household
+          methodName: execute
+          inputs:
+            run: >-
+              set -a; . "$HOME/.config/trader.env"; set +a;
+              printf '%s' "$SNAPSHOT" | trader household --file -
+            timeout: 60000
+            env:
+              SNAPSHOT: ${{ data.latest("budget-snapshot", "result").attributes.stdout }}
+  - name: plan
+    description: The trader's plan against the household, and a check that it adds up
+    dependsOn:
+      - job: budget
+        condition:
+          type: succeeded
+    steps:
+      - name: trader-plan
+        description: trader plan --json (one Claude call, about a minute); stdout is the plan and the household it used
+        task:
+          type: behavior
+          behaviorType: command/shell
+          behaviorName: trader-plan
+          methodName: execute
+          inputs:
+            run: >-
+              set -a; . "$HOME/.config/trader.env"; set +a;
+              TRADER_HOUSEHOLD_DIR= trader plan --json
+            timeout: 600000
+      - name: plan-slack
+        description: Kronor left after the plan's buys (invest now plus one month, minus buys and adds); the plan on stderr
+        dependsOn:
+          - step: trader-plan
+            condition:
+              type: succeeded
+        task:
+          type: behavior
+          behaviorType: command/shell
+          behaviorName: plan-slack
+          methodName: execute
+          inputs:
+            run: |
+              printf '%s' "$PLAN" | python3 -c '
+              import json, sys
+              d = json.load(sys.stdin); p = d["plan"]
+              buys = sum(a["amount_sek"] for a in p["actions"] if a["action"] in ("buy", "add"))
+              print(p["summary"], file=sys.stderr)
+              print("invest now", round(p["invest_now_sek"]), "per month", round(p["invest_per_month_sek"]), "buys", round(buys), file=sys.stderr)
+              for a in p["actions"]:
+                  print(" ", a["action"], a["name"], round(a["amount_sek"]), "kr:", a["why"], file=sys.stderr)
+              print(round(p["invest_now_sek"] + p["invest_per_month_sek"] - buys), end="")
+              '
+            timeout: 30000
+            env:
+              PLAN: ${{ data.latest("trader-plan", "result").attributes.stdout }}
+      - name: buys-fit
+        description: The plan may not buy more than it says is there to invest
+        dependsOn:
+          - step: plan-slack
+            condition:
+              type: succeeded
+        task:
+          type: assert
+          expr: >-
+            double(data.latest("plan-slack", "result").attributes.stdout) >= 0.0
+          message: "The plan's buys exceed invest now plus one month; read it before acting on it"
+          severity: high

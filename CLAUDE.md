@@ -90,6 +90,10 @@ live wiring.
   the stock analyst in `../trader` (verdicts with `amount_sek`, and `trader plan`, which
   says how much to invest now and per month, and where). The trader reads the budget with
   `jevcat report --months 6 --json`, run in this directory.
+  The Swamp workflow `invest` (`workflows/workflow-invest.yaml`) does the whole round on
+  the desktop: runs `sync`, hands `jevcat report --json` to `trader household --file -`,
+  makes a plan with `trader plan --json` and asserts its buys fit the money it says is
+  there (`--input syncBank=false` skips the bank). The plan's JSON is in the run's data.
 
 `jevcat sync` (bank pull, payee cleanup, categorize, fill budget from templates) runs every Monday 07:30 as a systemd user timer on
 a small home server; the same job also exists as the Swamp workflow `sync`

@@ -24,6 +24,16 @@ The trader needs its env for the CLI: run it as
 (set -a; . ~/.config/trader.env; set +a; trader <command>)
 ```
 
+## The quick way
+
+`swamp workflow run invest` does steps 1, 2 and 4 in one go: bank sync, budget to the
+trader, a fresh plan, and an assert that the plan's buys fit invest now plus one month.
+Read the plan back with
+`swamp data query 'behavior("trader-plan") && name == "result"' --select attributes.stdout`
+(JSON) or `trader plan --last`. On failure, `swamp report get @swamp/workflow-summary
+--workflow invest --json` before retrying. Bank sync only sees booked rows: a transfer
+made today usually lands the next banking day.
+
 ## Steps
 
 1. **Budget first.** `jevcat report --months 6`. Note the uncategorized share (say it
