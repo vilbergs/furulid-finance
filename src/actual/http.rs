@@ -136,6 +136,10 @@ impl ActualStore for HttpStore {
         self.get("accounts", &[]).await
     }
 
+    async fn account_balance(&self, account_id: &str) -> Result<i64> {
+        self.get(&format!("accounts/{account_id}/balance"), &[]).await
+    }
+
     async fn category_groups(&self) -> Result<Vec<CategoryGroup>> {
         self.get("categorygroups", &[]).await
     }

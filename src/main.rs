@@ -163,6 +163,11 @@ enum Command {
         /// Actual account name or id. Defaults to `import.account` or the only account.
         #[arg(long)]
         account: Option<String>,
+        /// Print the numbers as one JSON document in whole kronor instead of the tables
+        /// (income, spending, savings, surplus, uncategorized share, recurring charges,
+        /// account balance). The trader reads this to size its suggestions.
+        #[arg(long)]
+        json: bool,
     },
     /// Fill a month's budget from `#template <kr>` notes on the categories, the same
     /// notes Actual's own "apply budget template" reads. Categories already budgeted are
@@ -341,7 +346,7 @@ async fn main() -> Result<()> {
             let verb = if dry_run { "would change" } else { "changed" };
             println!("\n{verb} {merges} payees and {sets} transactions");
         }
-        Command::Report { months, account } => {
+        Command::Report { months, account, json } => {
             let account = pick_account(&snapshot, &config, account.as_deref())?;
             let months = report::month_list(months.max(1));
             let mut per_month = Vec::new();
@@ -351,13 +356,20 @@ async fn main() -> Result<()> {
             let transactions = store
                 .transactions(&account.id, &format!("{}-01", months[0]))
                 .await?;
-            let text = report::render(&report::Input {
+            let payee_names = snapshot.payee_names();
+            let input = report::Input {
                 months: &months,
                 per_month: &per_month,
                 transactions: &transactions,
-                payee_names: &snapshot.payee_names(),
-            });
-            print!("{text}");
+                payee_names: &payee_names,
+            };
+            if json {
+                let balance = store.account_balance(&account.id).await.ok();
+                let value = report::snapshot(&input, &account.name, balance);
+                println!("{}", serde_json::to_string_pretty(&value)?);
+            } else {
+                print!("{}", report::render(&input));
+            }
         }
         Command::Budget {
             month,

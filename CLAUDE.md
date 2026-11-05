@@ -86,6 +86,10 @@ live wiring.
   `jevcat --since-days N run` for a wider Jev pass, `jevcat set` to apply categories with a
   `#reviewed` note, and how to identify payees.
 - `update-actual`: bump the server and API images on Fly in lockstep.
+- `invest`: investment suggestions sized to the household. Combines `jevcat report` with
+  the stock analyst in `../trader` (verdicts with `amount_sek`, and `trader plan`, which
+  says how much to invest now and per month, and where). The trader reads the budget with
+  `jevcat report --months 6 --json`, run in this directory.
 
 `jevcat sync` (bank pull, payee cleanup, categorize, fill budget from templates) runs every Monday 07:30 as a systemd user timer on
 a small home server; the same job also exists as the Swamp workflow `sync`
@@ -157,5 +161,7 @@ general rules:
 - Be concrete: name the category, the monthly amount, and what the number would be after
   the change. Kronor, no percentages without the amount next to them. Vilberg prefers a
   short table over prose.
+- For anything about investing (what to buy, how much, amortize or not), use the `invest`
+  skill: the trader's verdicts and plan are already sized to this budget.
 - Do not moralize about hobbies, travel or the kids. Point out patterns (a subscription
   nobody uses, a category that doubled) and leave the judgment to him.

@@ -14,7 +14,7 @@ jevcat run                       categorize what is already uncategorized (dry r
 jevcat run --apply               ...and write it
 jevcat sync                      pull from the bank, clean payees, categorize, fill the budget; the weekly job
 jevcat payees                    merge per-day `Kortköp 260817 X` payees, name reference-number rows from notes
-jevcat report                    spending, income, budget and recurring charges per month
+jevcat report                    spending, income, budget and recurring charges per month (--json for tools)
 jevcat budget                    fill the current and next month from `#template <kr>` category notes
 jevcat calibrate                 measure accuracy per confidence on your categorized history
 jevcat learn --apply             turn payees Jev has placed consistently into Actual rules
@@ -42,7 +42,13 @@ full-history pass would do.
 the current budget, income per month, the current month against its budget, and every
 payee charged in three or more months with its monthly cost and anything odd: a charge
 that stopped, one billed twice a month at the same amount, two payees that look like the
-same service.
+same service. Money into an expense category (a refund, a reserve moved back from
+savings) shows as a negative amount.
+
+`jevcat report --json` prints the same numbers as one JSON document in whole kronor:
+income and spending per month and on average, net to the savings categories, the
+surplus, the uncategorized share, the recurring charges and the account's balance in
+Actual. The trader in `../trader` reads it to size its verdicts and its investment plan.
 
 Budgets come from `#template <kr>` in a category's note, the same note Actual's own
 "apply budget template" reads. `jevcat budget --set "Groceries=9500"` writes one,

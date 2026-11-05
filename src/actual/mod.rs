@@ -196,6 +196,8 @@ fn default_conditions_op() -> String {
 #[async_trait]
 pub trait ActualStore: Send + Sync {
     async fn accounts(&self) -> Result<Vec<Account>>;
+    /// The account's current balance in minor units, as Actual has it.
+    async fn account_balance(&self, account_id: &str) -> Result<i64>;
     async fn category_groups(&self) -> Result<Vec<CategoryGroup>>;
     async fn payees(&self) -> Result<Vec<Payee>>;
     /// Transactions of one account from `since` (YYYY-MM-DD) until today.
