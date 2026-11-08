@@ -158,7 +158,9 @@ general rules:
 - Report the uncategorized share first. Advice on a budget with more than a few percent
   uncategorized is advice on a guess.
 - Fixed commitments to keep in mind: three Nordea mortgage loans (Omsättning lån, ~9,335 kr
-  each per quarter plus interest), a Ziklo car loan, Avanza savings for Ylva (730 kr/month),
+  each per quarter plus interest), a rental car (about 4,500 kr a month from November 2026,
+  Melanie pays about 2,000 of it back; category Car Rental; the Ziklo car loan closed in October),
+  Avanza savings for Ylva (730 kr/month),
   Fello, Telia, Verisure, Varberg El and Vatten, insurance with If, LF, Arctic and ICA.
 - Income is salary from Teachiq AB, child benefit (Barnbidrag), parental benefit
   (Föräldrapenning, FKASSA) and occasional Utlandsinsättning from abroad.
